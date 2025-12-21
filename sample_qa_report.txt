@@ -1,0 +1,82 @@
+
+================================================================================
+VIDEO QA VALIDATION REPORT
+================================================================================
+Generated: 2025-12-21 22:48:41
+
+--------------------------------------------------------------------------------
+CAMERA INFORMATION
+--------------------------------------------------------------------------------
+Camera A: pull3_Take_007_left.mov
+  Frames: 7718
+  Frame Rate: 60 fps
+  Start TC: 02:55:23:00
+
+Camera B: pull3_Take_007_right.mov
+  Frames: 7718
+  Frame Rate: 60 fps
+  Start TC: 02:55:23:00
+
+--------------------------------------------------------------------------------
+1. SYNC STATUS
+--------------------------------------------------------------------------------
+Status: PASS
+Camera A Frame 0 TC: 02:55:23:00
+Camera B Frame 0 TC: 02:55:23:00
+
+--------------------------------------------------------------------------------
+2. CORRUPTION STATUS
+--------------------------------------------------------------------------------
+Camera A:
+  Status: PASS
+  Metadata Corrupted At: -1
+  Vision Corruptions: 0
+  Notes: No corruption detected
+
+Camera B:
+  Status: PASS
+  Metadata Corrupted At: -1
+  Vision Corruptions: 0
+  Notes: No corruption detected
+
+--------------------------------------------------------------------------------
+3. DROP FRAME ACCURACY
+--------------------------------------------------------------------------------
+Metric                         Camera A        Camera B
+------------------------------------------------------------
+Metadata Drop Count                  58              58
+Physical Drops Detected              58              58
+Indicator Drops Counted              58              58
+Successful Processes                 58              58
+False Negatives                       0               0
+False Positives                       0               0
+Drop Count Match                   PASS            PASS
+Indicator Accuracy                 PASS            PASS
+
+--------------------------------------------------------------------------------
+4. START TIMECODE VALIDATION
+--------------------------------------------------------------------------------
+Camera A:
+  Status: PASS
+  OCR Frame 0: 02:55:23:00
+  Metadata: 02:55:23:00
+
+Camera B:
+  Status: PASS
+  OCR Frame 0: 02:55:23:00
+  Metadata: 02:55:23:00
+
+--------------------------------------------------------------------------------
+5. INDICATOR HEALTH SUMMARY
+--------------------------------------------------------------------------------
+Camera A:
+  All drop indicators correctly reported
+
+Camera B:
+  All drop indicators correctly reported
+
+================================================================================
+OVERALL VALIDATION RESULT
+================================================================================
+RESULT: PASS
+

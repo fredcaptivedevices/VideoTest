@@ -1,0 +1,75 @@
+{
+  "generated_at": "2025-12-21T22:48:41.185736",
+  "validation_results": {
+    "sync": {
+      "status": "PASS",
+      "camera_a_frame0_tc": "02:55:23:00",
+      "camera_b_frame0_tc": "02:55:23:00",
+      "notes": ""
+    },
+    "corruption": {
+      "A": {
+        "status": "PASS",
+        "metadata_corrupted_at": -1,
+        "vision_corruptions_detected": 0,
+        "notes": "No corruption detected"
+      },
+      "B": {
+        "status": "PASS",
+        "metadata_corrupted_at": -1,
+        "vision_corruptions_detected": 0,
+        "notes": "No corruption detected"
+      }
+    },
+    "drop_accuracy": {
+      "A": {
+        "metadata_drop_count": 58,
+        "physical_drops_detected": 58,
+        "indicator_drops_counted": 58,
+        "successful_processes": 58,
+        "false_negatives": 0,
+        "false_positives": 0,
+        "drop_count_match": "PASS",
+        "indicator_accuracy": "PASS"
+      },
+      "B": {
+        "metadata_drop_count": 58,
+        "physical_drops_detected": 58,
+        "indicator_drops_counted": 58,
+        "successful_processes": 58,
+        "false_negatives": 0,
+        "false_positives": 0,
+        "drop_count_match": "PASS",
+        "indicator_accuracy": "PASS"
+      }
+    },
+    "start_timecode": {
+      "A": {
+        "status": "PASS",
+        "ocr_frame0_tc": "02:55:23:00",
+        "metadata_start_tc": "02:55:23:00",
+        "notes": ""
+      },
+      "B": {
+        "status": "PASS",
+        "ocr_frame0_tc": "02:55:23:00",
+        "metadata_start_tc": "02:55:23:00",
+        "notes": ""
+      }
+    }
+  },
+  "camera_a_metadata": {
+    "filename": "pull3_Take_007_left.mov",
+    "num_frames": 7718,
+    "frame_rate": 60,
+    "dropped_frames": 58,
+    "start_timecode": "02:55:23:00"
+  },
+  "camera_b_metadata": {
+    "filename": "pull3_Take_007_right.mov",
+    "num_frames": 7718,
+    "frame_rate": 60,
+    "dropped_frames": 58,
+    "start_timecode": "02:55:23:00"
+  }
+}

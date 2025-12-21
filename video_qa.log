@@ -1,0 +1,24 @@
+2025-12-21 23:37:34,084 - main - INFO - Starting batch validation of: /Users/fredisaac/CaptiveQA/data
+2025-12-21 23:37:34,084 - BatchValidator - INFO - Found 5 takes to process
+2025-12-21 23:37:34,084 - BatchValidator - INFO - [1/5] pull3/Take_001
+2025-12-21 23:37:34,085 - BatchValidator - INFO - Processing: Take_001
+2025-12-21 23:37:34,085 - DualCameraValidator - INFO - ============================================================
+2025-12-21 23:37:34,085 - DualCameraValidator - INFO - Starting Dual Camera Validation
+2025-12-21 23:37:34,085 - DualCameraValidator - INFO - ============================================================
+2025-12-21 23:37:34,085 - VideoAnalyser_A - INFO - Loaded metadata: pull3_Take_001_left.mov
+2025-12-21 23:37:34,085 - VideoAnalyser_A - INFO -   Reported drops: 0
+2025-12-21 23:37:34,085 - VideoAnalyser_A - INFO -   Start TC: 02:34:52:00
+2025-12-21 23:37:34,096 - FrameReader_A - INFO - Opened video: pull3_Take_001_left.mov
+2025-12-21 23:37:34,096 - FrameReader_A - INFO -   Frames: 7840, FPS: 60.0
+2025-12-21 23:37:34,096 - FrameReader_A - INFO -   Resolution: 1600x2472
+2025-12-21 23:37:34,096 - VideoAnalyser_B - INFO - Loaded metadata: pull3_Take_001_right.mov
+2025-12-21 23:37:34,096 - VideoAnalyser_B - INFO -   Reported drops: 0
+2025-12-21 23:37:34,097 - VideoAnalyser_B - INFO -   Start TC: 02:34:52:00
+2025-12-21 23:37:34,097 - FrameReader_B - INFO - Opened video: pull3_Take_001_right.mov
+2025-12-21 23:37:34,097 - FrameReader_B - INFO -   Frames: 7840, FPS: 60.0
+2025-12-21 23:37:34,097 - FrameReader_B - INFO -   Resolution: 1600x2472
+2025-12-21 23:37:36,342 - FrameReader_A - INFO - Timecode ROI detected: {'x': 380, 'y': 598, 'width': 840, 'height': 1276}
+2025-12-21 23:38:14,275 - FrameReader_B - WARNING - Auto-detection failed, using full-frame scan
+2025-12-21 23:38:14,276 - VideoAnalyser_B - WARNING - Timecode ROI auto-detection failed, using fallback
+2025-12-21 23:38:14,276 - DualCameraValidator - INFO - Analysing Camera A...
+2025-12-21 23:38:14,276 - VideoAnalyser_A - INFO - Starting analysis of 7840 frames...

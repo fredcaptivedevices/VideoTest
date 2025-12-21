@@ -1,0 +1,52 @@
+{
+    "version": "1.0.0",
+    "description": "Video QA Automation Configuration",
+    
+    "roi_drop_indicator": {
+        "description": "Fixed position ROI for 'Dropped frame' text overlay (top-left corner)",
+        "x": 0,
+        "y": 0,
+        "width": 250,
+        "height": 50,
+        "notes": "Based on screenshot analysis showing white text 'Dropped frame' in top-left"
+    },
+    
+    "ocr_settings": {
+        "timecode_pattern": "##:##:##:##",
+        "tesseract_config_digits": "--psm 7 -c tessedit_char_whitelist=0123456789:.",
+        "tesseract_config_text": "--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz ",
+        "drop_indicator_keywords": ["drop", "dropped", "frame"],
+        "scale_factor": 2
+    },
+    
+    "thresholds": {
+        "duplicate_frame_hash_distance": 5,
+        "timecode_jump_corruption_threshold": 100,
+        "drop_indicator_brightness_threshold": 180,
+        "adaptive_threshold_block_size": 11,
+        "adaptive_threshold_c": 2
+    },
+    
+    "validation_rules": {
+        "require_sync": true,
+        "require_matching_frame_count": true,
+        "require_matching_drop_count": false,
+        "max_acceptable_drop_rate_percent": 1.0,
+        "max_false_negatives": 0,
+        "max_false_positives": 0
+    },
+    
+    "output_settings": {
+        "generate_html_report": true,
+        "generate_text_report": true,
+        "generate_json_report": true,
+        "generate_frame_csv": true,
+        "debug_save_flagged_frames": true
+    },
+    
+    "logging": {
+        "level": "INFO",
+        "file": "video_qa.log",
+        "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    }
+}
