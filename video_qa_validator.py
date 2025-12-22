@@ -14,6 +14,7 @@ import pandas as pd
 import json
 import re
 import os
+import sys
 import logging
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, List, Dict, Any
@@ -22,8 +23,6 @@ from datetime import datetime
 from enum import Enum, auto
 import pytesseract
 from collections import defaultdict
-import imagehash
-from PIL import Image
 
 
 # =============================================================================
@@ -48,7 +47,12 @@ TIMECODE_LOOSE_PATTERN = re.compile(r'(\d{1,2})\D*(\d{2})\D*(\d{2})\D*(\d{2})')
 
 # Image comparison thresholds
 DUPLICATE_FRAME_THRESHOLD = 5  # Hash difference threshold for duplicate detection
+DUPLICATE_MSE_THRESHOLD = 20.0  # MSE threshold - lower = stricter
 TIMECODE_JUMP_THRESHOLD = 100  # Maximum expected frame jump before flagging corruption
+
+# Known frame resolution for Captive Devices cameras
+KNOWN_FRAME_WIDTH = 1600
+KNOWN_FRAME_HEIGHT = 2472
 
 
 class FrameStatus(Enum):
@@ -176,6 +180,12 @@ class FrameReader:
     """
     Handles frame extraction and analysis from video files.
     Includes drop zone detection and timecode OCR.
+    
+    PERFORMANCE OPTIMISATIONS:
+    - Sequential frame reading (no seeking)
+    - Downscaled frames for hashing
+    - Cached ROI extraction
+    - Simplified duplicate detection using structural similarity
     """
     
     def __init__(self, video_path: Path, camera_id: str = "A"):
@@ -191,15 +201,19 @@ class FrameReader:
         self.roi_timecode: Optional[Dict[str, int]] = None
         self.timecode_calibrated: bool = False
         
+        # Performance: cache previous frame hash
+        self._prev_frame_small: Optional[np.ndarray] = None
+        self._hash_size: int = 16  # Size for downscaled hash comparison
+        
         # Logger
         self.logger = logging.getLogger(f"FrameReader_{camera_id}")
-        
+    
     def open(self) -> bool:
         """Open video file and initialise properties"""
         if not self.video_path.exists():
             self.logger.error(f"Video file not found: {self.video_path}")
             return False
-            
+        
         self.cap = cv2.VideoCapture(str(self.video_path))
         if not self.cap.isOpened():
             self.logger.error(f"Failed to open video: {self.video_path}")
@@ -209,6 +223,9 @@ class FrameReader:
         self.fps = self.cap.get(cv2.CAP_PROP_FPS)
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # Performance: set buffer size for sequential reading
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
         
         self.logger.info(f"Opened video: {self.video_path.name}")
         self.logger.info(f"  Frames: {self.total_frames}, FPS: {self.fps}")
@@ -222,8 +239,19 @@ class FrameReader:
             self.cap.release()
             self.cap = None
     
+    def read_next_frame(self) -> Optional[np.ndarray]:
+        """Read the next frame sequentially (faster than seeking)"""
+        if not self.cap:
+            return None
+        
+        ret, frame = self.cap.read()
+        if not ret:
+            return None
+        
+        return frame
+    
     def read_frame(self, frame_number: int) -> Optional[np.ndarray]:
-        """Read a specific frame from the video"""
+        """Read a specific frame from the video (use read_next_frame for sequential access)"""
         if not self.cap:
             return None
         
@@ -240,6 +268,8 @@ class FrameReader:
         """
         Detect if the 'Dropped frame' indicator is present.
         Uses fixed ROI based on known overlay position (top-left).
+        
+        OPTIMISED: Simple pixel intensity check before OCR
         """
         # Extract drop indicator region
         roi = frame[
@@ -250,8 +280,18 @@ class FrameReader:
         # Convert to grayscale
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         
-        # Apply threshold to isolate white text on dark background
+        # OPTIMISATION: Quick check - if region is too dark, skip OCR
+        mean_brightness = np.mean(gray)
+        if mean_brightness < 30:  # Very dark region, no text
+            return False
+        
+        # Check for white pixels (text) in the region
         _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
+        white_pixel_ratio = np.sum(thresh > 0) / thresh.size
+        
+        # If less than 1% white pixels, probably no text
+        if white_pixel_ratio < 0.01:
+            return False
         
         # Use OCR to detect "Dropped" or "DROP" text
         ocr_config = '--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz '
@@ -265,76 +305,167 @@ class FrameReader:
         """
         Auto-detect the timecode region on the first frame.
         Scans for digital display pattern (##:##:##:##).
+        
+        The slate can be ANYWHERE in the frame - searches entire image.
+        Optimised for known 1600x2472 portrait resolution.
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        height, width = gray.shape
         
-        # Apply adaptive threshold for better digit detection
-        thresh = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-            cv2.THRESH_BINARY, 11, 2
-        )
+        self.logger.info(f"Auto-detecting timecode ROI in {width}x{height} frame...")
         
-        # Also try inverse for LED displays (bright digits on dark)
-        _, thresh_inv = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+        # Strategy 1: Look for the bright LED timecode display
+        # The timecode is bright white/green digits on dark background
+        # LED displays typically have very high brightness (200+)
         
-        # Scan regions of the image for timecode pattern
-        scan_regions = self._generate_scan_regions(frame.shape)
-        
-        for region in scan_regions:
-            x, y, w, h = region
+        for thresh_val in [230, 210, 190, 170, 150]:
+            _, bright_mask = cv2.threshold(gray, thresh_val, 255, cv2.THRESH_BINARY)
             
-            # Try both threshold methods
-            for thresh_img in [thresh, thresh_inv]:
-                roi = thresh_img[y:y+h, x:x+w]
+            # Dilate to connect the LED segments into digit shapes
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 8))
+            dilated = cv2.dilate(bright_mask, kernel, iterations=3)
+            
+            # Find contours
+            contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # Sort by area (largest bright regions first)
+            contours = sorted(contours, key=cv2.contourArea, reverse=True)
+            
+            for contour in contours[:15]:  # Check top 15 candidates
+                x, y, w, h = cv2.boundingRect(contour)
+                aspect_ratio = w / h if h > 0 else 0
+                area = w * h
                 
-                # OCR with digit-focused config
-                ocr_config = '--psm 7 -c tessedit_char_whitelist=0123456789:'
-                text = pytesseract.image_to_string(roi, config=ocr_config).strip()
-                
-                # Check if we found a timecode pattern
-                if TIMECODE_PATTERN.search(text) or TIMECODE_LOOSE_PATTERN.search(text):
-                    # Expand ROI slightly for safety margin
-                    self.roi_timecode = {
-                        'x': max(0, x - 20),
-                        'y': max(0, y - 20),
-                        'width': min(w + 40, frame.shape[1] - x),
-                        'height': min(h + 40, frame.shape[0] - y)
-                    }
-                    self.timecode_calibrated = True
-                    self.logger.info(f"Timecode ROI detected: {self.roi_timecode}")
-                    return True
+                # Timecode displays: wide rectangle
+                # Format "00:00:00:00" has aspect ratio roughly 4:1 to 7:1
+                # On 1600px wide frame, display is typically 300-500px wide
+                if 2.5 < aspect_ratio < 9.0 and w > 60 and h > 12 and area > 1500:
+                    # Add generous padding
+                    padding = 50
+                    roi_x = max(0, x - padding)
+                    roi_y = max(0, y - padding)
+                    roi_w = min(width - roi_x, w + 2 * padding)
+                    roi_h = min(height - roi_y, h + 2 * padding)
+                    
+                    # Try OCR on this region
+                    test_roi = gray[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w]
+                    tc = self._try_ocr_timecode(test_roi)
+                    
+                    if tc:
+                        self.roi_timecode = {'x': roi_x, 'y': roi_y, 'width': roi_w, 'height': roi_h}
+                        self.timecode_calibrated = True
+                        self.logger.info(f"Timecode ROI detected (thresh={thresh_val}): x={roi_x}, y={roi_y}, w={roi_w}, h={roi_h}")
+                        self.logger.info(f"  Initial timecode reading: {tc}")
+                        return True
         
-        # If auto-detection fails, try full-frame OCR as fallback
-        self.logger.warning("Auto-detection failed, using full-frame scan")
+        # Strategy 2: Grid-based scan of entire frame
+        # For 1600x2472, use appropriately sized windows
+        self.logger.info("Bright region detection failed, trying grid scan...")
+        
+        # Window sizes optimised for 1600x2472 resolution
+        # Timecode display is roughly 350-450px wide, 50-80px tall
+        window_sizes = [(450, 100), (400, 90), (350, 80), (500, 110)]
+        
+        for win_w, win_h in window_sizes:
+            step_x = win_w // 3  # 66% overlap for thorough coverage
+            step_y = win_h // 2
+            
+            for y in range(0, height - win_h, step_y):
+                for x in range(0, width - win_w, step_x):
+                    test_roi = gray[y:y+win_h, x:x+win_w]
+                    
+                    # Quick check: skip very dark regions
+                    if np.max(test_roi) < 120:
+                        continue
+                    
+                    tc = self._try_ocr_timecode(test_roi)
+                    
+                    if tc:
+                        padding = 40
+                        self.roi_timecode = {
+                            'x': max(0, x - padding),
+                            'y': max(0, y - padding),
+                            'width': min(win_w + 2*padding, width - x + padding),
+                            'height': min(win_h + 2*padding, height - y + padding)
+                        }
+                        self.timecode_calibrated = True
+                        self.logger.info(f"Timecode ROI detected (grid scan): {self.roi_timecode}")
+                        self.logger.info(f"  Initial timecode reading: {tc}")
+                        return True
+        
+        # Fallback: Use generous centre-lower region (where slate typically is in portrait)
+        self.logger.warning("Auto-detection failed, using default centre ROI")
+        # For 1600x2472, slate is often in lower-centre area
         self.roi_timecode = {
-            'x': 0,
-            'y': 0,
-            'width': frame.shape[1],
-            'height': frame.shape[0]
+            'x': 100,
+            'y': height // 3,
+            'width': width - 200,
+            'height': height // 2
         }
         return False
+    
+    def _try_ocr_timecode(self, roi: np.ndarray) -> Optional[Timecode]:
+        """Attempt OCR on a region and return Timecode if valid pattern found"""
+        if roi.size == 0 or roi.shape[0] < 10 or roi.shape[1] < 50:
+            return None
+        
+        # Quick brightness check - timecode region should have bright pixels
+        if np.max(roi) < 100:
+            return None
+            
+        # Try multiple threshold methods
+        methods = [
+            lambda img: cv2.threshold(img, 200, 255, cv2.THRESH_BINARY)[1],
+            lambda img: cv2.threshold(img, 180, 255, cv2.THRESH_BINARY)[1],
+            lambda img: cv2.threshold(img, 150, 255, cv2.THRESH_BINARY)[1],
+            lambda img: cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
+            lambda img: cv2.threshold(img, 220, 255, cv2.THRESH_BINARY)[1],
+        ]
+        
+        for method in methods:
+            try:
+                thresh = method(roi)
+                
+                # Scale up for better OCR
+                scale = 2.0 if roi.shape[1] < 300 else 1.5
+                scaled = cv2.resize(thresh, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+                
+                ocr_config = '--psm 7 -c tessedit_char_whitelist=0123456789:.'
+                text = pytesseract.image_to_string(scaled, config=ocr_config).strip()
+                text = text.replace('.', ':').replace(' ', '').replace('O', '0').replace('o', '0')
+                
+                tc = Timecode.from_string(text)
+                if tc:
+                    return tc
+            except Exception:
+                continue
+        
+        return None
     
     def _generate_scan_regions(self, shape: Tuple[int, ...]) -> List[Tuple[int, int, int, int]]:
         """Generate regions to scan for timecode display"""
         height, width = shape[:2]
         regions = []
         
-        # Common positions for digital slates
-        # Centre-right area (where clapperboard typically is)
-        regions.append((width // 3, height // 4, width * 2 // 3, height // 2))
+        # Common positions for digital slates - prioritise right side and centre
+        # Right third (most common for clapperboards)
+        regions.append((width // 2, height // 4, width // 2, height // 2))
         
-        # Full centre
+        # Centre area
         regions.append((width // 4, height // 4, width // 2, height // 2))
         
-        # Right third
+        # Upper right
+        regions.append((width // 2, 0, width // 2, height // 2))
+        
+        # Full right side
         regions.append((width * 2 // 3, 0, width // 3, height))
         
-        # Sliding window approach for thorough coverage
-        window_w, window_h = 400, 100
-        step = 100
+        # Sliding window for thorough coverage
+        window_w, window_h = 350, 80
+        step = 150
         
         for y in range(0, height - window_h, step):
-            for x in range(0, width - window_w, step):
+            for x in range(width // 3, width - window_w, step):  # Focus on right 2/3
                 regions.append((x, y, window_w, window_h))
         
         return regions
@@ -343,6 +474,8 @@ class FrameReader:
         """
         Extract timecode from frame using OCR.
         Returns tuple of (Timecode object, raw OCR text).
+        
+        OPTIMISED: Reduced preprocessing steps
         """
         if not self.roi_timecode:
             return None, ""
@@ -353,30 +486,19 @@ class FrameReader:
             self.roi_timecode['x']:self.roi_timecode['x'] + self.roi_timecode['width']
         ]
         
-        # Pre-process for LED display (white/green digits on black)
+        # Convert to grayscale
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         
-        # Multiple threshold attempts
+        # OPTIMISED: Try just 2 threshold methods instead of 4
         results = []
         
-        # Method 1: Simple binary threshold (for bright displays)
+        # Method 1: Simple binary threshold (for bright LED displays)
         _, thresh1 = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
         results.append(self._ocr_timecode(thresh1))
         
-        # Method 2: OTSU threshold
+        # Method 2: OTSU (auto threshold)
         _, thresh2 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         results.append(self._ocr_timecode(thresh2))
-        
-        # Method 3: Adaptive threshold
-        thresh3 = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 11, 2
-        )
-        results.append(self._ocr_timecode(thresh3))
-        
-        # Method 4: Inverted (for dark text on light background)
-        _, thresh4 = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV)
-        results.append(self._ocr_timecode(thresh4))
         
         # Return the first successful parse
         for tc, raw in results:
@@ -389,8 +511,8 @@ class FrameReader:
     
     def _ocr_timecode(self, thresh_img: np.ndarray) -> Tuple[Optional[Timecode], str]:
         """Perform OCR on thresholded image and parse timecode"""
-        # Scale up for better OCR
-        scaled = cv2.resize(thresh_img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        # OPTIMISED: Use INTER_LINEAR instead of INTER_CUBIC (faster)
+        scaled = cv2.resize(thresh_img, None, fx=2, fy=2, interpolation=cv2.INTER_LINEAR)
         
         # OCR configuration for seven-segment displays
         ocr_config = '--psm 7 -c tessedit_char_whitelist=0123456789:.'
@@ -403,25 +525,69 @@ class FrameReader:
         return tc, raw_text
     
     def compute_frame_hash(self, frame: np.ndarray) -> str:
-        """Compute perceptual hash for frame comparison"""
-        # Convert to PIL Image
-        pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        """
+        Compute perceptual hash for frame comparison.
         
-        # Compute average hash (fast and effective for duplicate detection)
-        hash_value = imagehash.average_hash(pil_image)
-        return str(hash_value)
+        OPTIMISED: Use OpenCV resize + simple hash instead of imagehash library
+        """
+        # Convert to grayscale and resize to small square
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        small = cv2.resize(gray, (self._hash_size, self._hash_size), interpolation=cv2.INTER_AREA)
+        
+        # Compute average hash
+        avg = np.mean(small)
+        hash_bits = (small > avg).flatten()
+        
+        # Convert to hex string
+        hash_int = 0
+        for bit in hash_bits:
+            hash_int = (hash_int << 1) | int(bit)
+        
+        return format(hash_int, f'0{self._hash_size * self._hash_size // 4}x')
     
     def frames_are_duplicate(self, frame1: np.ndarray, frame2: np.ndarray) -> bool:
         """
         Check if two frames are visual duplicates (physical drop).
-        Uses perceptual hashing to handle minor compression artefacts.
-        """
-        hash1 = imagehash.average_hash(Image.fromarray(cv2.cvtColor(frame1, cv2.COLOR_BGR2RGB)))
-        hash2 = imagehash.average_hash(Image.fromarray(cv2.cvtColor(frame2, cv2.COLOR_BGR2RGB)))
         
-        # Hamming distance between hashes
-        difference = hash1 - hash2
-        return difference <= DUPLICATE_FRAME_THRESHOLD
+        OPTIMISED: Use structural similarity on downscaled frames
+        """
+        # Downscale both frames for fast comparison
+        size = (64, 64)
+        small1 = cv2.resize(cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY), size, interpolation=cv2.INTER_AREA)
+        small2 = cv2.resize(cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY), size, interpolation=cv2.INTER_AREA)
+        
+        # Compute mean squared error
+        mse = np.mean((small1.astype(float) - small2.astype(float)) ** 2)
+        
+        # If MSE is very low, frames are duplicates
+        # Use configurable threshold
+        return mse < DUPLICATE_MSE_THRESHOLD
+    
+    def frames_are_duplicate_fast(self, current_frame: np.ndarray) -> bool:
+        """
+        Fast duplicate check using cached previous frame.
+        Call this instead of frames_are_duplicate for sequential processing.
+        """
+        # Downscale current frame
+        size = (64, 64)
+        small_current = cv2.resize(
+            cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY), 
+            size, 
+            interpolation=cv2.INTER_AREA
+        )
+        
+        if self._prev_frame_small is None:
+            self._prev_frame_small = small_current
+            return False
+        
+        # Compute mean squared error
+        mse = np.mean((small_current.astype(float) - self._prev_frame_small.astype(float)) ** 2)
+        
+        # Update cache
+        self._prev_frame_small = small_current
+        
+        # Use configurable threshold - stricter to avoid false positives
+        return mse < DUPLICATE_MSE_THRESHOLD
 
 
 # =============================================================================
@@ -481,25 +647,86 @@ class VideoAnalyser:
         
         return True
     
-    def calibrate(self) -> bool:
-        """Calibrate timecode detection on first frame"""
+    def calibrate(self, manual_roi: Optional[Dict[str, int]] = None, save_debug: bool = False) -> bool:
+        """
+        Calibrate timecode detection on first frame.
+        
+        Args:
+            manual_roi: Optional manual override for timecode ROI
+                        Format: {'x': int, 'y': int, 'width': int, 'height': int}
+            save_debug: If True, saves a debug image showing detected ROI
+        """
         if not self.reader:
             return False
+        
+        # If manual ROI provided, use it directly
+        if manual_roi:
+            self.reader.roi_timecode = manual_roi
+            self.reader.timecode_calibrated = True
+            self.logger.info(f"Using manual timecode ROI: {manual_roi}")
+            return True
         
         frame = self.reader.read_frame(0)
         if frame is None:
             self.logger.error("Cannot read first frame for calibration")
             return False
         
+        # Reset to frame 0 after calibration read
+        self.reader.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        
         success = self.reader.auto_detect_timecode_roi(frame)
         if not success:
             self.logger.warning("Timecode ROI auto-detection failed, using fallback")
         
+        # Save debug image showing ROI
+        if save_debug and self.reader.roi_timecode:
+            self._save_calibration_debug(frame)
+        
         return True
+    
+    def _save_calibration_debug(self, frame: np.ndarray):
+        """Save a debug image showing the detected ROI regions"""
+        debug_frame = frame.copy()
+        
+        # Draw timecode ROI in green
+        if self.reader.roi_timecode:
+            roi = self.reader.roi_timecode
+            cv2.rectangle(
+                debug_frame,
+                (roi['x'], roi['y']),
+                (roi['x'] + roi['width'], roi['y'] + roi['height']),
+                (0, 255, 0), 3
+            )
+            cv2.putText(
+                debug_frame, "TIMECODE ROI",
+                (roi['x'], roi['y'] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
+            )
+        
+        # Draw drop indicator ROI in red
+        cv2.rectangle(
+            debug_frame,
+            (ROI_DROP['x'], ROI_DROP['y']),
+            (ROI_DROP['x'] + ROI_DROP['width'], ROI_DROP['y'] + ROI_DROP['height']),
+            (0, 0, 255), 2
+        )
+        cv2.putText(
+            debug_frame, "DROP INDICATOR ROI",
+            (ROI_DROP['x'], ROI_DROP['y'] + ROI_DROP['height'] + 20),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1
+        )
+        
+        # Save
+        DEBUG_OUTPUT_DIR.mkdir(exist_ok=True)
+        debug_path = DEBUG_OUTPUT_DIR / f"calibration_cam{self.camera_id}.png"
+        cv2.imwrite(str(debug_path), debug_frame)
+        self.logger.info(f"Saved calibration debug image: {debug_path}")
     
     def analyse(self, progress_callback=None) -> bool:
         """
         Run full frame-by-frame analysis implementing Truth Table logic.
+        
+        OPTIMISED: Sequential frame reading, fast duplicate detection
         """
         if not self.reader or not self.metadata:
             self.logger.error("Must call load() before analyse()")
@@ -513,9 +740,16 @@ class VideoAnalyser:
         
         self.logger.info(f"Starting analysis of {total} frames...")
         
+        # Progress tracking
+        start_time = datetime.now()
+        last_progress_pct = -1
+        
+        # Reset video to start for sequential reading
+        self.reader.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        
         for frame_num in range(total):
-            # Read current frame
-            frame = self.reader.read_frame(frame_num)
+            # OPTIMISED: Sequential read instead of seeking
+            frame = self.reader.read_next_frame()
             if frame is None:
                 analysis = FrameAnalysis(
                     frame_number=frame_num,
@@ -529,10 +763,12 @@ class VideoAnalyser:
             # Create analysis record
             analysis = FrameAnalysis(frame_number=frame_num)
             
-            # Compute frame hash
-            analysis.image_hash = self.reader.compute_frame_hash(frame)
+            # OPTIMISED: Use fast duplicate check with caching
+            analysis.is_physical_duplicate = self.reader.frames_are_duplicate_fast(frame)
+            if analysis.is_physical_duplicate:
+                self.stats['physical_drops'] += 1
             
-            # Check drop indicator
+            # Check drop indicator (has early-exit optimisation)
             analysis.drop_indicator_present = self.reader.detect_drop_indicator(frame)
             if analysis.drop_indicator_present:
                 self.stats['indicated_drops'] += 1
@@ -542,13 +778,8 @@ class VideoAnalyser:
             analysis.visual_timecode = tc
             analysis.visual_timecode_raw = raw
             
-            # Check for physical duplicate (dropped frame)
-            if prev_frame is not None:
-                analysis.is_physical_duplicate = self.reader.frames_are_duplicate(
-                    prev_frame, frame
-                )
-                if analysis.is_physical_duplicate:
-                    self.stats['physical_drops'] += 1
+            # Compute frame hash (optimised - no PIL conversion)
+            analysis.image_hash = self.reader.compute_frame_hash(frame)
             
             # Apply Truth Table Logic
             analysis.status = self._apply_logic_gates(analysis, prev_analysis)
@@ -568,14 +799,43 @@ class VideoAnalyser:
             self.results.append(analysis)
             
             # Update for next iteration
-            prev_frame = frame.copy()
             prev_analysis = analysis
             
-            # Progress callback
+            # Progress reporting - update every 1%
+            current_pct = int((frame_num + 1) / total * 100)
+            is_complete = frame_num == total - 1
+            
+            if current_pct > last_progress_pct or is_complete:
+                last_progress_pct = current_pct
+                
+                elapsed_total = (datetime.now() - start_time).total_seconds()
+                fps_rate = (frame_num + 1) / elapsed_total if elapsed_total > 0 else 0
+                
+                if fps_rate > 0:
+                    remaining_frames = total - frame_num - 1
+                    eta_seconds = remaining_frames / fps_rate
+                    eta_min = int(eta_seconds // 60)
+                    eta_sec = int(eta_seconds % 60)
+                    eta_str = f"{eta_min:3d}m {eta_sec:02d}s"
+                else:
+                    eta_str = "calculating..."
+                
+                bar_width = 30
+                filled = int(bar_width * current_pct // 100)
+                bar = "=" * filled + ">" + " " * (bar_width - filled - 1) if current_pct < 100 else "=" * bar_width
+                
+                sys.stdout.write(f"\r  [{bar}] {current_pct:3d}% | {frame_num + 1:6d}/{total} frames | {fps_rate:5.1f} fps | ETA: {eta_str}")
+                sys.stdout.flush()
+            
+            # Legacy callback support
             if progress_callback and frame_num % 100 == 0:
                 progress_callback(frame_num, total)
         
-        self.logger.info("Analysis complete")
+        # Final newline
+        print()
+        
+        elapsed = (datetime.now() - start_time).total_seconds()
+        self.logger.info(f"Analysis complete in {elapsed:.1f}s ({total/elapsed:.1f} fps average)")
         return True
     
     def _apply_logic_gates(
@@ -699,7 +959,7 @@ class DualCameraValidator:
         self.validation_results: Dict[str, Any] = {}
         self.logger = logging.getLogger("DualCameraValidator")
     
-    def run_full_validation(self, progress_callback=None) -> bool:
+    def run_full_validation(self, progress_callback=None, save_calibration_debug: bool = True) -> bool:
         """Execute complete validation pipeline"""
         self.logger.info("=" * 60)
         self.logger.info("Starting Dual Camera Validation")
@@ -714,15 +974,15 @@ class DualCameraValidator:
             self.logger.error("Failed to load Camera B")
             return False
         
-        # Calibrate timecode detection
-        self.analyser_a.calibrate()
-        self.analyser_b.calibrate()
+        # Calibrate timecode detection (save debug images to see what was detected)
+        self.analyser_a.calibrate(save_debug=save_calibration_debug)
+        self.analyser_b.calibrate(save_debug=save_calibration_debug)
         
         # Run analysis on both cameras
-        self.logger.info("Analysing Camera A...")
+        print("\n  Analysing Camera A (Left)...")
         self.analyser_a.analyse(progress_callback)
         
-        self.logger.info("Analysing Camera B...")
+        print("\n  Analysing Camera B (Right)...")
         self.analyser_b.analyse(progress_callback)
         
         # Run validation checks

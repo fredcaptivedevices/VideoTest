@@ -163,6 +163,10 @@ class BatchValidator:
                 output_dir=take_output
             )
             
+            # Show which files we're processing
+            print(f"\n  Camera A: {files['video_a'].name}")
+            print(f"  Camera B: {files['video_b'].name}")
+            
             success = validator.run_full_validation()
             
             if success:
@@ -179,6 +183,12 @@ class BatchValidator:
                     'report_text': text_path,
                     'overall_pass': self._check_overall_pass(validator.validation_results)
                 }
+                
+                # Print quick result summary
+                status_icon = "✓" if result['overall_pass'] else "✗"
+                drops_a = validator.analyser_a.stats.get('physical_drops', 0)
+                drops_b = validator.analyser_b.stats.get('physical_drops', 0)
+                print(f"\n  Result: {status_icon} {'PASS' if result['overall_pass'] else 'FAIL'} | Drops: A={drops_a}, B={drops_b}")
             else:
                 result = {
                     'take_name': take_name,
@@ -187,6 +197,7 @@ class BatchValidator:
                     'error': 'Validation failed to complete',
                     'overall_pass': False
                 }
+                print(f"\n  Result: ✗ FAILED - Validation did not complete")
                 
         except Exception as e:
             self.logger.error(f"Error processing {take_name}: {e}")
@@ -197,6 +208,7 @@ class BatchValidator:
                 'error': str(e),
                 'overall_pass': False
             }
+            print(f"\n  Result: ✗ ERROR - {e}")
         
         return result
     
@@ -221,15 +233,28 @@ class BatchValidator:
     def validate_all_takes(self, debug: bool = False) -> List[Dict]:
         """Discover and validate all takes in the data directory"""
         takes = self.discovery.find_all_takes()
+        total_takes = len(takes)
         
-        self.logger.info(f"Found {len(takes)} takes to process")
+        print(f"\n{'='*60}")
+        print(f"Found {total_takes} takes to process")
+        print(f"{'='*60}")
         
         for i, take_path in enumerate(takes, 1):
-            self.logger.info(f"[{i}/{len(takes)}] {take_path.relative_to(self.data_dir)}")
+            rel_path = take_path.relative_to(self.data_dir)
+            
+            print(f"\n{'─'*60}")
+            print(f"[{i}/{total_takes}] {rel_path}")
+            print(f"{'─'*60}")
             
             result = self.validate_single_take(take_path, debug=debug)
             if result:
                 self.results.append(result)
+        
+        # Print final summary
+        passed = sum(1 for r in self.results if r.get('overall_pass', False))
+        print(f"\n{'='*60}")
+        print(f"BATCH COMPLETE: {passed}/{total_takes} takes passed")
+        print(f"{'='*60}\n")
         
         return self.results
     
