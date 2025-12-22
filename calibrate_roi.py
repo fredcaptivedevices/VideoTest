@@ -246,13 +246,23 @@ def save_roi_config(roi: Dict[str, int], output_path: Path):
 
 
 def load_roi_config(config_path: Path) -> Optional[Dict[str, int]]:
-    """Load ROI configuration from JSON file"""
+    """
+    Load ROI configuration from JSON file.
+
+    Supports both legacy format (timecode_roi) and new format (roi_a, roi_b).
+    """
     if not config_path.exists():
         return None
-    
+
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
+
+        # New format with per-camera ROIs
+        if 'roi_a' in config:
+            return config.get('roi_a')
+
+        # Legacy format
         return config.get('timecode_roi')
     except Exception as e:
         print(f"Error loading ROI config: {e}")
@@ -276,25 +286,26 @@ def calibrate_from_video(video_path: Path) -> Optional[Dict[str, int]]:
 
 
 def calibrate_take_folder(take_path: Path) -> Optional[Dict[str, int]]:
-    """Run calibration for a take folder and save config"""
+    """
+    Run calibration for a take folder and save config.
+
+    NOTE: ROI is saved ONLY to the take folder because the slate
+    can move between takes. Each take requires its own calibration.
+    """
     video = find_video_in_folder(take_path)
     if not video:
         print(f"Error: No video files found in {take_path}")
         return None
-    
+
     roi = calibrate_from_video(video)
-    
+
     if roi:
-        # Save to take folder
+        # Save to take folder ONLY (not to parent/shot folder)
+        # Each take may have different slate positioning
         config_path = take_path / 'roi_config.json'
         save_roi_config(roi, config_path)
-        
-        # Also save to parent (shot) folder for reuse
-        shot_folder = take_path.parent
-        shot_config_path = shot_folder / 'roi_config.json'
-        save_roi_config(roi, shot_config_path)
-        print(f"ROI also saved to shot folder: {shot_config_path}")
-    
+        print(f"\nNOTE: ROI saved to take folder only (slate may move between takes)")
+
     return roi
 
 

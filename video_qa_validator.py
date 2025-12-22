@@ -1263,26 +1263,51 @@ class VideoAnalyser:
         return True
 
     def _load_roi_from_config(self) -> Optional[Dict[str, int]]:
-        """Load ROI from roi_config.json if it exists"""
+        """
+        Load ROI from roi_config.json in the take folder.
+
+        NOTE: ROI config is now per-take only (not inherited from shot folder)
+        because the slate may move between takes.
+        """
         video_folder = self.video_path.parent
 
-        search_paths = [
-            video_folder / 'roi_config.json',
-            video_folder.parent / 'roi_config.json',
-            video_folder.parent.parent / 'roi_config.json',
-        ]
+        # Only look in the take folder - not parent folders
+        # Each take requires its own ROI calibration
+        config_path = video_folder / 'roi_config.json'
 
-        for config_path in search_paths:
-            if config_path.exists():
-                try:
-                    with open(config_path, 'r') as f:
-                        config = json.load(f)
-                    roi = config.get('timecode_roi')
+        if config_path.exists():
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+
+                # New format with per-camera ROIs
+                camera_key = f'roi_{self.camera_id.lower()}'
+                if camera_key in config:
+                    roi = config[camera_key]
                     if roi and all(k in roi for k in ['x', 'y', 'width', 'height']):
-                        self.logger.info(f"Found ROI config: {config_path}")
+                        self.logger.info(f"Found per-camera ROI config: {config_path} [{camera_key}]")
                         return roi
-                except Exception as e:
-                    self.logger.warning(f"Error loading ROI config {config_path}: {e}")
+
+                # Fallback to roi_a/roi_b format
+                if 'roi_a' in config and self.camera_id.upper() == 'A':
+                    roi = config['roi_a']
+                    if roi and all(k in roi for k in ['x', 'y', 'width', 'height']):
+                        self.logger.info(f"Found ROI config: {config_path} [roi_a]")
+                        return roi
+                elif 'roi_b' in config and self.camera_id.upper() == 'B':
+                    roi = config['roi_b']
+                    if roi and all(k in roi for k in ['x', 'y', 'width', 'height']):
+                        self.logger.info(f"Found ROI config: {config_path} [roi_b]")
+                        return roi
+
+                # Legacy format with single timecode_roi
+                roi = config.get('timecode_roi')
+                if roi and all(k in roi for k in ['x', 'y', 'width', 'height']):
+                    self.logger.info(f"Found ROI config (legacy format): {config_path}")
+                    return roi
+
+            except Exception as e:
+                self.logger.warning(f"Error loading ROI config {config_path}: {e}")
 
         return None
 
