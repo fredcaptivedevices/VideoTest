@@ -38,16 +38,28 @@ _EASYOCR_READER = None
 def get_ocr_reader():
     """
     Lazy initialisation of EasyOCR reader (only created once).
-    Automatically uses GPU if CUDA is available.
+    Automatically uses GPU if available:
+    - NVIDIA GPUs via CUDA
+    - Apple Silicon (M1/M2/M3) via MPS (Metal Performance Shaders)
     """
     global _EASYOCR_READER
     if _EASYOCR_READER is None:
-        # Auto-detect GPU availability
         import torch
-        use_gpu = torch.cuda.is_available()
-        if use_gpu:
+        
+        # Check for GPU availability
+        use_gpu = False
+        gpu_name = "None"
+        
+        # Check NVIDIA CUDA first
+        if torch.cuda.is_available():
+            use_gpu = True
             gpu_name = torch.cuda.get_device_name(0)
-            print(f"  [OCR] Using GPU: {gpu_name}")
+            print(f"  [OCR] Using NVIDIA GPU: {gpu_name}")
+        # Check Apple Silicon MPS
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            use_gpu = True
+            gpu_name = "Apple Silicon (MPS)"
+            print(f"  [OCR] Using Apple Silicon GPU (Metal)")
         else:
             print("  [OCR] No GPU detected, using CPU (slower)")
         
@@ -63,6 +75,10 @@ ROI_DROP = {
     'width': 250,
     'height': 50
 }
+
+# Debug: Save OCR input images for troubleshooting
+DEBUG_OCR = True  # Set to True to save OCR debug images
+DEBUG_OCR_DIR = Path("debug_ocr")
 
 # Timecode pattern for OCR validation
 # Standard: HH:MM:SS:FF with colons
@@ -141,6 +157,8 @@ class Timecode:
         - No separators: "02312106" 
         - Partial separators: "02:312106"
         - Missing leading zeros: "2312106"
+        
+        Returns None for invalid timecodes (minutes >= 60, seconds >= 60, frames >= 60)
         """
         if not tc_string:
             return None
@@ -148,18 +166,26 @@ class Timecode:
         # Clean the string
         tc_string = tc_string.strip()
         
+        def is_valid_timecode(h, m, s, f):
+            """Check if timecode values are valid"""
+            # Hours can be 0-23 (or higher for long recordings)
+            # Minutes must be 0-59
+            # Seconds must be 0-59
+            # Frames must be 0-59 (for up to 60fps)
+            return 0 <= h <= 99 and 0 <= m <= 59 and 0 <= s <= 59 and 0 <= f <= 59
+        
         # Try standard pattern first: HH:MM:SS:FF
         match = TIMECODE_PATTERN.search(tc_string)
         if match:
             h, m, s, f = int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4))
-            if m < 60 and s < 60 and f < 60:  # Basic sanity check
+            if is_valid_timecode(h, m, s, f):
                 return cls(hours=h, minutes=m, seconds=s, frames=f)
         
         # Try loose pattern: digits with any/no separators
         match = TIMECODE_LOOSE_PATTERN.search(tc_string)
         if match:
             h, m, s, f = int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4))
-            if m < 60 and s < 60 and f < 60:
+            if is_valid_timecode(h, m, s, f):
                 return cls(hours=h, minutes=m, seconds=s, frames=f)
         
         # Try extracting just digits and parsing as HHMMSSFF
@@ -168,18 +194,17 @@ class Timecode:
         if len(digits_only) == 8:
             # HHMMSSFF
             h, m, s, f = int(digits_only[0:2]), int(digits_only[2:4]), int(digits_only[4:6]), int(digits_only[6:8])
-            if m < 60 and s < 60 and f < 60:
+            if is_valid_timecode(h, m, s, f):
                 return cls(hours=h, minutes=m, seconds=s, frames=f)
         elif len(digits_only) == 7:
             # HMMSSFF (single digit hour)
             h, m, s, f = int(digits_only[0:1]), int(digits_only[1:3]), int(digits_only[3:5]), int(digits_only[5:7])
-            if m < 60 and s < 60 and f < 60:
+            if is_valid_timecode(h, m, s, f):
                 return cls(hours=h, minutes=m, seconds=s, frames=f)
         elif len(digits_only) == 6:
-            # MMSSFF (no hour, assume 0) or HMMSSF (missing frame digit)
-            # Try MMSSFF first (more common for short recordings)
+            # MMSSFF (no hour, assume 0)
             m, s, f = int(digits_only[0:2]), int(digits_only[2:4]), int(digits_only[4:6])
-            if m < 60 and s < 60 and f < 60:
+            if is_valid_timecode(0, m, s, f):
                 return cls(hours=0, minutes=m, seconds=s, frames=f)
         
         return None
@@ -581,7 +606,7 @@ class FrameReader:
         Extract timecode from frame using EasyOCR.
         Returns tuple of (Timecode object, raw OCR text).
         
-        Optimised for seven-segment LED displays (Ambient LockitSlate).
+        Optimised for white dot-matrix LED displays on monochrome footage.
         """
         if not self.roi_timecode:
             return None, ""
@@ -592,33 +617,76 @@ class FrameReader:
             self.roi_timecode['x']:self.roi_timecode['x'] + self.roi_timecode['width']
         ]
         
-        # For red LED displays, the red channel often has better contrast
-        red_channel = roi[:, :, 2]  # BGR format, so index 2 is red
+        # For monochrome footage, all channels are the same
+        # Use grayscale directly
+        if len(roi.shape) == 3:
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = roi.copy()
         
-        # Convert to grayscale as fallback
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        # Step 1: Apply strong Gaussian blur to fuse the dot-matrix LED dots
+        # Use larger kernel for better dot fusion
+        blur_kernel = 7  # Larger kernel for better fusion
+        blurred = cv2.GaussianBlur(gray, (blur_kernel, blur_kernel), 0)
         
-        # Try multiple preprocessing approaches
+        # Step 2: Apply morphological closing to further connect dots
+        # This helps fill gaps between LED dots
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        
+        # Debug: Save first few ROI images to help troubleshoot OCR issues
+        if DEBUG_OCR:
+            if not hasattr(self, '_debug_ocr_count'):
+                self._debug_ocr_count = 0
+            self._debug_ocr_count += 1
+            if self._debug_ocr_count <= 10:  # Save first 10 frames only
+                try:
+                    DEBUG_OCR_DIR.mkdir(exist_ok=True)
+                    cv2.imwrite(str(DEBUG_OCR_DIR / f"cam{self.camera_id}_frame{self._debug_ocr_count:04d}_1_roi.png"), roi)
+                    cv2.imwrite(str(DEBUG_OCR_DIR / f"cam{self.camera_id}_frame{self._debug_ocr_count:04d}_2_gray.png"), gray)
+                    cv2.imwrite(str(DEBUG_OCR_DIR / f"cam{self.camera_id}_frame{self._debug_ocr_count:04d}_3_blurred.png"), blurred)
+                except Exception as e:
+                    self.logger.debug(f"Failed to save debug OCR image: {e}")
+        
+        # Try multiple preprocessing approaches optimised for white LED on dark background
         images_to_try = []
         
-        # Method 1: Red channel with high threshold (best for red LEDs)
-        _, thresh1 = cv2.threshold(red_channel, 180, 255, cv2.THRESH_BINARY)
-        images_to_try.append(thresh1)
+        # Method 1: Blur + High threshold (for bright LEDs)
+        _, thresh1 = cv2.threshold(blurred, 200, 255, cv2.THRESH_BINARY)
+        thresh1 = cv2.morphologyEx(thresh1, cv2.MORPH_CLOSE, kernel)
+        images_to_try.append(('thresh200', thresh1))
         
-        # Method 2: Red channel with lower threshold  
-        _, thresh2 = cv2.threshold(red_channel, 150, 255, cv2.THRESH_BINARY)
-        images_to_try.append(thresh2)
+        # Method 2: Blur + Medium threshold
+        _, thresh2 = cv2.threshold(blurred, 180, 255, cv2.THRESH_BINARY)
+        thresh2 = cv2.morphologyEx(thresh2, cv2.MORPH_CLOSE, kernel)
+        images_to_try.append(('thresh180', thresh2))
         
-        # Method 3: Original ROI (let EasyOCR handle it)
-        images_to_try.append(roi)
+        # Method 3: Blur + Lower threshold
+        _, thresh3 = cv2.threshold(blurred, 150, 255, cv2.THRESH_BINARY)
+        thresh3 = cv2.morphologyEx(thresh3, cv2.MORPH_CLOSE, kernel)
+        images_to_try.append(('thresh150', thresh3))
         
-        # Method 4: Grayscale with OTSU
-        _, thresh3 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        images_to_try.append(thresh3)
+        # Method 4: Blur + OTSU auto-threshold
+        _, thresh4 = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        thresh4 = cv2.morphologyEx(thresh4, cv2.MORPH_CLOSE, kernel)
+        images_to_try.append(('otsu', thresh4))
+        
+        # Method 5: Adaptive threshold on blurred image
+        thresh5 = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                         cv2.THRESH_BINARY, 21, -5)
+        thresh5 = cv2.morphologyEx(thresh5, cv2.MORPH_CLOSE, kernel)
+        images_to_try.append(('adaptive', thresh5))
+        
+        # Debug: Save threshold images for first few frames
+        if DEBUG_OCR and hasattr(self, '_debug_ocr_count') and self._debug_ocr_count <= 5:
+            try:
+                for name, img in images_to_try:
+                    cv2.imwrite(str(DEBUG_OCR_DIR / f"cam{self.camera_id}_frame{self._debug_ocr_count:04d}_4_{name}.png"), img)
+            except Exception as e:
+                self.logger.debug(f"Failed to save debug threshold image: {e}")
         
         # Try each preprocessed image
         all_raw_texts = []
-        for img in images_to_try:
+        for name, img in images_to_try:
             tc, raw = self._ocr_timecode_easyocr(img)
             if tc is not None:
                 return tc, raw
@@ -633,41 +701,73 @@ class FrameReader:
         try:
             reader = get_ocr_reader()
             
-            # Scale up for better recognition
-            scale = 2
-            if len(img.shape) == 2:
-                # Grayscale - convert to BGR for EasyOCR
-                img_scaled = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            # Scale up significantly for better recognition of dot-matrix displays
+            # Larger scale helps EasyOCR see the digit shapes clearly
+            scale = 3
+            img_scaled = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            
+            # If grayscale, convert to BGR for EasyOCR
+            if len(img_scaled.shape) == 2:
                 img_for_ocr = cv2.cvtColor(img_scaled, cv2.COLOR_GRAY2BGR)
             else:
-                img_scaled = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
                 img_for_ocr = img_scaled
+            
+            img_height = img_for_ocr.shape[0]
             
             # Run EasyOCR - allowlist only digits and colon
             results = reader.readtext(
                 img_for_ocr,
                 allowlist='0123456789:',
                 paragraph=False,
-                detail=1
+                detail=1,
+                width_ths=0.7,
+                height_ths=0.7
             )
             
             if not results:
                 return None, ""
             
-            # Combine all detected text
-            raw_parts = []
+            # Filter results: only keep text from the UPPER portion of the ROI
+            # The timecode display is at the top, labels like SCENE/SHOT are below
+            upper_threshold = img_height * 0.5  # Only look at top 50% of ROI
+            
+            filtered_results = []
             for (bbox, text, confidence) in results:
-                if confidence > 0.1:  # Low threshold to catch partial reads
-                    raw_parts.append(text)
+                # bbox is [[x1,y1], [x2,y1], [x2,y2], [x1,y2]]
+                # Get the center Y position of this text
+                center_y = (bbox[0][1] + bbox[2][1]) / 2
+                
+                # Only include if in upper portion of image
+                if center_y < upper_threshold and confidence > 0.1:
+                    # Additional filter: skip very short single characters that aren't digits
+                    clean_text = text.strip()
+                    if len(clean_text) >= 1:
+                        filtered_results.append((bbox, text, confidence))
+            
+            if not filtered_results:
+                # Fallback: try all results if filtering removed everything
+                filtered_results = [(b, t, c) for b, t, c in results if c > 0.1]
+            
+            # Sort by x-position (left to right)
+            sorted_results = sorted(filtered_results, key=lambda r: r[0][0][0])
+            
+            # Combine text
+            raw_parts = []
+            for (bbox, text, confidence) in sorted_results:
+                raw_parts.append(text)
             
             raw_text = ''.join(raw_parts)
             
-            # Clean up common OCR errors
+            # Clean up common OCR errors for dot-matrix displays
             raw_text = raw_text.replace('.', ':').replace(' ', '')
             raw_text = raw_text.replace('O', '0').replace('o', '0')
             raw_text = raw_text.replace('l', '1').replace('I', '1').replace('|', '1')
             raw_text = raw_text.replace('S', '5').replace('s', '5')
             raw_text = raw_text.replace('B', '8').replace('G', '6')
+            raw_text = raw_text.replace('Z', '2').replace('z', '2')
+            raw_text = raw_text.replace('A', '4').replace('g', '9')
+            raw_text = raw_text.replace('D', '0').replace('Q', '0')
+            raw_text = raw_text.replace('T', '1').replace('i', '1')
             
             # Try to parse timecode
             tc = Timecode.from_string(raw_text)

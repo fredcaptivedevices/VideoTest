@@ -105,14 +105,27 @@ This will:
 The system requires you to manually select the timecode display region for **both cameras** at the start of each shot:
 
 1. **Camera A window** opens showing the first frame
-2. Click and drag to draw a box around the timecode display
+2. **Draw a TIGHT box around ONLY the timecode digits** (e.g., `02:37:24:12`)
+   - Do NOT include the entire slate - just the LED display area
+   - Include a small margin (~10 pixels) around the digits
+   - The ROI should be roughly 400-600 pixels wide and 60-100 pixels tall
 3. Press **ENTER** to confirm
 4. **Camera B window** opens
-5. Click and drag to draw a box around the timecode display  
+5. Draw a tight box around the timecode display  
 6. Press **ENTER** to confirm
 7. Press **ESC** at any point to skip the entire shot
 
+**Important:** A tight ROI dramatically improves OCR accuracy. If the ROI is too large (capturing the whole slate), OCR will fail frequently.
+
 The ROIs are saved to `roi_config.json` and used for all takes in that shot.
+
+### Debugging OCR Issues
+
+If OCR accuracy is poor, check the `debug_ocr/` folder which contains:
+- `camA_frame0001_roi.png` - The actual region being sent to OCR
+- `camA_frame0001_thresh200.png` - Thresholded image
+
+If the ROI images show too much of the slate (not just the timecode), recalibrate with a tighter selection.
 
 ### Command Line (Single Take)
 

@@ -108,11 +108,17 @@ class ROISelector:
         print("ROI CALIBRATION")
         print("=" * 60)
         print("Instructions:")
-        print("  1. Click and drag to draw a box around the TIMECODE DISPLAY")
-        print("  2. Make sure the box includes the full timecode (00:00:00:00)")
-        print("  3. Press ENTER or SPACE to confirm")
-        print("  4. Press 'R' to reset and try again")
-        print("  5. Press ESC or 'Q' to cancel")
+        print("  1. Click and drag to draw a TIGHT box around ONLY THE DIGITS")
+        print("     Example: 00:24:26:01")
+        print("")
+        print("  IMPORTANT: Select ONLY the timecode digits, NOT the whole slate!")
+        print("  - Do NOT include 'SCENE/SHOT', 'TAKE', 'DATE', 'FPS' text")
+        print("  - Include small margin (~10px) around the digits")
+        print("  - Box should be ~400-600px wide, ~60-100px tall")
+        print("")
+        print("  2. Press ENTER or SPACE to confirm")
+        print("  3. Press 'R' to reset and try again")
+        print("  4. Press ESC or 'Q' to cancel")
         print("=" * 60 + "\n")
         
         while True:
@@ -123,9 +129,9 @@ class ROISelector:
                 display = self.display_frame.copy()
             
             # Add instructions overlay
-            cv2.putText(display, "Draw box around timecode, then press ENTER to confirm",
+            cv2.putText(display, "Draw TIGHT box around DIGITS ONLY (not whole slate)",
                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-            cv2.putText(display, "Press R to reset, ESC to cancel",
+            cv2.putText(display, "Press ENTER to confirm, R to reset, ESC to cancel",
                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
             
             # Show ROI info if selected
