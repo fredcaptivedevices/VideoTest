@@ -338,6 +338,11 @@ class LEDTimecodeOCR:
             'easyocr_wins': 0
         }
 
+        # Cache successful preprocessing methods for faster subsequent frames
+        # Format: [(preprocess_name, scale, engine), ...]
+        self._successful_methods: List[Tuple[str, float, str]] = []
+        self._max_cached_methods = 5
+
     def preprocess_led_display(self, roi: np.ndarray) -> List[Tuple[str, np.ndarray]]:
         """
         Generate multiple preprocessed versions of the LED display ROI.
@@ -509,7 +514,7 @@ class LEDTimecodeOCR:
 
     def ocr_with_easyocr(self, img: np.ndarray, scale: float = 2.0) -> Tuple[Optional[Timecode], str, float]:
         """
-        Run EasyOCR on preprocessed image.
+        Run EasyOCR on preprocessed image with multiple configurations.
 
         Returns (timecode, raw_text, confidence)
         """
@@ -530,57 +535,139 @@ class LEDTimecodeOCR:
             else:
                 img_for_ocr = img_scaled
 
-            # Run EasyOCR with digit allowlist
-            results = reader.readtext(
-                img_for_ocr,
-                allowlist='0123456789:',
-                paragraph=False,
-                detail=1,
-                width_ths=0.5,  # Less restrictive
-                height_ths=0.5,
-                contrast_ths=0.1,  # Accept lower contrast
-                adjust_contrast=0.5
-            )
+            # Multiple EasyOCR configurations to try (optimized for LED displays)
+            easyocr_configs = [
+                # Config 1: Standard with low thresholds
+                {
+                    'allowlist': '0123456789:',
+                    'paragraph': False,
+                    'detail': 1,
+                    'width_ths': 0.5,
+                    'height_ths': 0.5,
+                    'contrast_ths': 0.1,
+                    'adjust_contrast': 0.5
+                },
+                # Config 2: Lower text threshold for faint digits
+                {
+                    'allowlist': '0123456789:',
+                    'paragraph': False,
+                    'detail': 1,
+                    'text_threshold': 0.5,
+                    'low_text': 0.3,
+                    'link_threshold': 0.3,
+                },
+                # Config 3: Very permissive
+                {
+                    'allowlist': '0123456789:',
+                    'paragraph': False,
+                    'detail': 1,
+                    'width_ths': 0.3,
+                    'height_ths': 0.3,
+                    'text_threshold': 0.4,
+                    'low_text': 0.2,
+                },
+                # Config 4: Paragraph mode (better for connected text)
+                {
+                    'allowlist': '0123456789:',
+                    'paragraph': True,
+                    'detail': 1,
+                    'width_ths': 0.7,
+                },
+                # Config 5: High magnification for small text
+                {
+                    'allowlist': '0123456789:',
+                    'paragraph': False,
+                    'detail': 1,
+                    'mag_ratio': 2.0,
+                    'text_threshold': 0.6,
+                },
+            ]
 
-            if not results:
-                return None, "", 0.0
+            best_tc = None
+            best_raw = ""
+            best_conf = 0.0
 
-            # Sort by x-position and combine
-            sorted_results = sorted(results, key=lambda r: r[0][0][0])
+            for config in easyocr_configs:
+                try:
+                    results = reader.readtext(img_for_ocr, **config)
 
-            texts = []
-            confidences = []
-            for (bbox, text, conf) in sorted_results:
-                texts.append(text.strip())
-                confidences.append(conf)
+                    if not results:
+                        continue
 
-            raw_text = ''.join(texts)
-            avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+                    # Sort by x-position and combine
+                    sorted_results = sorted(results, key=lambda r: r[0][0][0])
 
-            # Clean up and parse
-            raw_text = self._clean_ocr_text(raw_text)
-            tc = Timecode.from_string(raw_text)
+                    texts = []
+                    confidences = []
+                    for (bbox, text, conf) in sorted_results:
+                        text = text.strip()
+                        if text:
+                            texts.append(text)
+                            confidences.append(conf)
 
-            return tc, raw_text, avg_conf * 100  # Normalize to 0-100
+                    if not texts:
+                        continue
+
+                    raw_text = ''.join(texts)
+                    avg_conf = sum(confidences) / len(confidences) * 100
+
+                    # Clean and try to parse
+                    cleaned = self._clean_ocr_text(raw_text)
+                    tc = Timecode.from_string(cleaned)
+
+                    # If valid timecode and better confidence, keep it
+                    if tc and avg_conf > best_conf:
+                        best_tc = tc
+                        best_raw = cleaned
+                        best_conf = avg_conf
+
+                    # Early exit on high confidence valid result
+                    if best_tc and best_conf > 85:
+                        break
+
+                except Exception:
+                    continue
+
+            return best_tc, best_raw, best_conf
 
         except Exception as e:
             self.logger.debug(f"EasyOCR error: {e}")
             return None, "", 0.0
 
     def _clean_ocr_text(self, text: str) -> str:
-        """Clean up common OCR errors"""
+        """Clean up common OCR errors for timecode recognition"""
         if not text:
             return ""
 
-        # Replace common OCR misreads, but be conservative
+        # Replace common OCR misreads
         replacements = {
-            '.': ':',   # Period to colon
+            '.': ':',   # Period to colon (common separator confusion)
+            ',': ':',   # Comma to colon
+            ';': ':',   # Semicolon to colon
             ' ': '',    # Remove spaces
             'O': '0',   # O to zero
-            'o': '0',
+            'o': '0',   # lowercase o to zero
+            'Q': '0',   # Q to zero
+            'D': '0',   # D to zero (closed loop)
             'l': '1',   # lowercase L to one
             'I': '1',   # uppercase I to one
             '|': '1',   # pipe to one
+            'i': '1',   # lowercase i to one
+            '!': '1',   # exclamation to one
+            'S': '5',   # S to five
+            's': '5',   # lowercase s to five
+            'B': '8',   # B to eight
+            'Z': '2',   # Z to two
+            'z': '2',   # lowercase z to two
+            'G': '6',   # G to six
+            'g': '9',   # g to nine (loop at bottom)
+            'q': '9',   # q to nine
+            'A': '4',   # A to four
+            'b': '6',   # b to six
+            'T': '7',   # T to seven
+            '\n': '',   # Remove newlines
+            '\r': '',   # Remove carriage returns
+            '-': ':',   # Hyphen to colon (sometimes used as separator)
         }
 
         for old, new in replacements.items():
@@ -592,6 +679,8 @@ class LEDTimecodeOCR:
         """
         Extract timecode from ROI using multiple preprocessing strategies and OCR engines.
 
+        Uses method caching to prioritize previously successful strategies.
+
         Returns (timecode, raw_text, confidence)
         """
         self.stats['attempts'] += 1
@@ -602,6 +691,7 @@ class LEDTimecodeOCR:
 
         # Generate preprocessed images
         preprocessed_images = self.preprocess_led_display(roi)
+        preprocessed_dict = {name: img for name, img in preprocessed_images}
 
         # Debug: Save preprocessing results for first N frames
         if DEBUG_OCR and (DEBUG_OCR_SAVE_ALL or self._frame_count <= DEBUG_OCR_FIRST_N):
@@ -613,31 +703,77 @@ class LEDTimecodeOCR:
         best_conf = 0.0
         best_method = ""
 
-        # Try each preprocessed image with both OCR engines
-        for name, img in preprocessed_images:
-            # Try multiple scale factors
-            for scale in [2.0, 3.0, 2.5]:
-                # Try Tesseract
-                if TESSERACT_AVAILABLE:
-                    tc, raw, conf = self.ocr_with_tesseract(img, scale)
-                    if tc and conf > best_conf:
-                        best_tc = tc
-                        best_raw = raw
-                        best_conf = conf
-                        best_method = f"tesseract_{name}_s{scale}"
+        # PHASE 1: Try cached successful methods first (much faster)
+        for cached_name, cached_scale, cached_engine in self._successful_methods:
+            if cached_name in preprocessed_dict:
+                img = preprocessed_dict[cached_name]
 
-                # Try EasyOCR
-                if EASYOCR_AVAILABLE:
-                    tc, raw, conf = self.ocr_with_easyocr(img, scale)
-                    if tc and conf > best_conf:
-                        best_tc = tc
-                        best_raw = raw
-                        best_conf = conf
-                        best_method = f"easyocr_{name}_s{scale}"
+                if cached_engine == 'tesseract' and TESSERACT_AVAILABLE:
+                    tc, raw, conf = self.ocr_with_tesseract(img, cached_scale)
+                elif cached_engine == 'easyocr' and EASYOCR_AVAILABLE:
+                    tc, raw, conf = self.ocr_with_easyocr(img, cached_scale)
+                else:
+                    continue
 
-            # Early exit if we get a high-confidence result
-            if best_conf > 80:
-                break
+                if tc and conf > best_conf:
+                    best_tc = tc
+                    best_raw = raw
+                    best_conf = conf
+                    best_method = f"{cached_engine}_{cached_name}_s{cached_scale}"
+
+                # If cached method works well, use it
+                if best_tc and best_conf > 70:
+                    break
+
+        # PHASE 2: Full search if cached methods didn't work well
+        if not best_tc or best_conf < 70:
+            for name, img in preprocessed_images:
+                # Skip methods we already tried from cache
+                already_tried = any(
+                    name == cn for cn, _, _ in self._successful_methods
+                )
+
+                for scale in [2.0, 3.0, 2.5]:
+                    # Try Tesseract
+                    if TESSERACT_AVAILABLE:
+                        tc, raw, conf = self.ocr_with_tesseract(img, scale)
+                        if tc and conf > best_conf:
+                            best_tc = tc
+                            best_raw = raw
+                            best_conf = conf
+                            best_method = f"tesseract_{name}_s{scale}"
+
+                    # Try EasyOCR
+                    if EASYOCR_AVAILABLE:
+                        tc, raw, conf = self.ocr_with_easyocr(img, scale)
+                        if tc and conf > best_conf:
+                            best_tc = tc
+                            best_raw = raw
+                            best_conf = conf
+                            best_method = f"easyocr_{name}_s{scale}"
+
+                # Early exit if we get a high-confidence result
+                if best_conf > 80:
+                    break
+
+        # Update cache with successful method
+        if best_tc and best_method:
+            # Parse method string to extract components
+            parts = best_method.split('_')
+            if len(parts) >= 3:
+                engine = parts[0]
+                # Reconstruct preprocess name (everything between engine and scale)
+                scale_part = parts[-1]  # e.g., "s2.0"
+                scale = float(scale_part[1:]) if scale_part.startswith('s') else 2.0
+                preprocess_name = '_'.join(parts[1:-1])
+
+                # Add to cache if not already there
+                cache_entry = (preprocess_name, scale, engine)
+                if cache_entry not in self._successful_methods:
+                    self._successful_methods.insert(0, cache_entry)
+                    # Keep cache limited
+                    if len(self._successful_methods) > self._max_cached_methods:
+                        self._successful_methods.pop()
 
         # Update stats
         if best_tc:
