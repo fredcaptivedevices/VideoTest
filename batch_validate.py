@@ -212,6 +212,27 @@ class BatchValidator:
         
         return result
     
+    def _find_roi_config(self, take_path: Path) -> Optional[Dict[str, int]]:
+        """Look for roi_config.json in take folder or parent folders"""
+        search_paths = [
+            take_path / 'roi_config.json',
+            take_path.parent / 'roi_config.json',
+            take_path.parent.parent / 'roi_config.json',
+        ]
+        
+        for config_path in search_paths:
+            if config_path.exists():
+                try:
+                    with open(config_path, 'r') as f:
+                        config = json.load(f)
+                    roi = config.get('timecode_roi')
+                    if roi:
+                        return roi
+                except Exception:
+                    pass
+        
+        return None
+    
     def _check_overall_pass(self, validation_results: Dict) -> bool:
         """Determine if all validation checks passed"""
         try:
@@ -235,28 +256,109 @@ class BatchValidator:
         takes = self.discovery.find_all_takes()
         total_takes = len(takes)
         
+        if total_takes == 0:
+            print(f"\nNo takes found in {self.data_dir}")
+            return []
+        
         print(f"\n{'='*60}")
         print(f"Found {total_takes} takes to process")
         print(f"{'='*60}")
         
-        for i, take_path in enumerate(takes, 1):
-            rel_path = take_path.relative_to(self.data_dir)
+        # Group takes by shot (parent folder)
+        shots = {}
+        for take_path in takes:
+            shot_name = take_path.parent.name
+            if shot_name not in shots:
+                shots[shot_name] = []
+            shots[shot_name].append(take_path)
+        
+        print(f"Organised into {len(shots)} shots")
+        
+        # Process each shot
+        for shot_name, shot_takes in shots.items():
+            print(f"\n{'='*60}")
+            print(f"SHOT: {shot_name} ({len(shot_takes)} takes)")
+            print(f"{'='*60}")
             
-            print(f"\n{'─'*60}")
-            print(f"[{i}/{total_takes}] {rel_path}")
-            print(f"{'─'*60}")
+            # Check/create ROI config for this shot using first take
+            shot_folder = shot_takes[0].parent
+            roi_config = self._ensure_roi_config_for_shot(shot_folder, shot_takes[0])
             
-            result = self.validate_single_take(take_path, debug=debug)
-            if result:
-                self.results.append(result)
+            if roi_config is None:
+                print(f"\n  Skipping shot {shot_name} - calibration cancelled")
+                for take_path in shot_takes:
+                    self.results.append({
+                        'take_name': take_path.name,
+                        'take_path': str(take_path),
+                        'status': 'SKIPPED',
+                        'error': 'ROI calibration cancelled',
+                        'overall_pass': False
+                    })
+                continue
+            
+            # Process all takes in this shot
+            for i, take_path in enumerate(shot_takes, 1):
+                rel_path = take_path.relative_to(self.data_dir)
+                
+                print(f"\n{'─'*60}")
+                print(f"[{i}/{len(shot_takes)}] {rel_path}")
+                print(f"{'─'*60}")
+                
+                result = self.validate_single_take(take_path, debug=debug)
+                if result:
+                    self.results.append(result)
         
         # Print final summary
         passed = sum(1 for r in self.results if r.get('overall_pass', False))
         print(f"\n{'='*60}")
-        print(f"BATCH COMPLETE: {passed}/{total_takes} takes passed")
+        print(f"BATCH COMPLETE: {passed}/{len(self.results)} takes passed")
         print(f"{'='*60}\n")
         
         return self.results
+    
+    def _ensure_roi_config_for_shot(self, shot_folder: Path, first_take: Path) -> Optional[Dict[str, int]]:
+        """
+        Always open calibration GUI for each shot.
+        The ROI is saved for reference but recalibration is required each run.
+        """
+        print(f"\n  Opening calibration tool...")
+        print(f"  → Draw a box around the TIMECODE DISPLAY")
+        print(f"  → Press ENTER to confirm, ESC to skip this shot")
+        
+        # Find a video to calibrate with
+        files = self.discovery.get_take_files(first_take)
+        if not files:
+            print(f"  Error: Could not find video files")
+            return None
+        
+        video_path = files['video_a']  # Use left camera
+        
+        # Run calibration GUI
+        try:
+            from calibrate_roi import calibrate_from_video, save_roi_config
+            
+            roi_config = calibrate_from_video(video_path)
+            
+            if roi_config:
+                # Save to shot folder (for reference/logging)
+                config_path = shot_folder / 'roi_config.json'
+                save_roi_config(roi_config, config_path)
+                print(f"\n  ✓ ROI configured")
+                print(f"  ✓ Will be used for all takes in this shot")
+                return roi_config
+            else:
+                print(f"\n  ✗ Calibration cancelled")
+                return None
+                
+        except ImportError as e:
+            print(f"  Error: Could not import calibrate_roi module: {e}")
+            print(f"  Make sure calibrate_roi.py is in the same directory")
+            return None
+        except Exception as e:
+            print(f"  Error during calibration: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
     
     def generate_batch_summary(self) -> Tuple[str, str]:
         """Generate summary report for all processed takes"""

@@ -47,12 +47,18 @@ TIMECODE_LOOSE_PATTERN = re.compile(r'(\d{1,2})\D*(\d{2})\D*(\d{2})\D*(\d{2})')
 
 # Image comparison thresholds
 DUPLICATE_FRAME_THRESHOLD = 5  # Hash difference threshold for duplicate detection
-DUPLICATE_MSE_THRESHOLD = 20.0  # MSE threshold - lower = stricter
+DUPLICATE_MSE_THRESHOLD = 5.0  # MSE threshold for timecode region - very strict
 TIMECODE_JUMP_THRESHOLD = 100  # Maximum expected frame jump before flagging corruption
 
 # Known frame resolution for Captive Devices cameras
 KNOWN_FRAME_WIDTH = 1600
 KNOWN_FRAME_HEIGHT = 2472
+
+# High frame rate support
+# When shooting at 60fps but timecode runs at 30fps, each timecode value
+# appears for 2 consecutive frames. This is normal, not a drop.
+# Set to 2 for 60fps/30fps TC, 1 for matched rates (e.g. 30fps/30fps)
+FRAME_RATE_MULTIPLIER = 2  # How many video frames per timecode frame
 
 
 class FrameStatus(Enum):
@@ -201,9 +207,16 @@ class FrameReader:
         self.roi_timecode: Optional[Dict[str, int]] = None
         self.timecode_calibrated: bool = False
         
-        # Performance: cache previous frame hash
+        # Timecode-based duplicate detection
+        # At 60fps with 30fps timecode, each TC value appears for 2 consecutive frames
+        # We track the timecode value and count how many frames show it
+        self._prev_timecode: Optional['Timecode'] = None
+        self._consecutive_same_tc: int = 0  # How many frames with same TC value
+        
+        # Legacy image-based detection (fallback if OCR fails)
         self._prev_frame_small: Optional[np.ndarray] = None
-        self._hash_size: int = 16  # Size for downscaled hash comparison
+        self._hash_size: int = 16
+        self._consecutive_duplicates: int = 0
         
         # Logger
         self.logger = logging.getLogger(f"FrameReader_{camera_id}")
@@ -545,49 +558,125 @@ class FrameReader:
         
         return format(hash_int, f'0{self._hash_size * self._hash_size // 4}x')
     
+    def check_timecode_duplicate(self, current_tc: Optional['Timecode']) -> bool:
+        """
+        Check if this frame is a duplicate based on TIMECODE VALUE.
+        
+        This is the primary duplicate detection method. At 60fps with 30fps timecode
+        (from an Ambient LockitSlate), each timecode value appears for exactly 2 frames.
+        
+        FRAME_RATE_MULTIPLIER controls expected duplicates:
+        - Multiplier=2 (60fps/30tc): Each TC appears on 2 frames, so seeing it twice is normal
+        - Multiplier=1 (30fps/30tc): Each TC should appear once, any repeat is a drop
+        
+        Returns True if we've seen this timecode MORE times than expected (indicating a drop).
+        """
+        if current_tc is None:
+            # OCR failed - can't determine duplicate status from timecode
+            return False
+        
+        if self._prev_timecode is None:
+            # First frame with valid timecode
+            self._prev_timecode = current_tc
+            self._consecutive_same_tc = 1
+            return False
+        
+        # Compare timecode values
+        if current_tc.to_frames() == self._prev_timecode.to_frames():
+            # Same timecode as previous frame
+            self._consecutive_same_tc += 1
+        else:
+            # Timecode changed - reset counter
+            self._prev_timecode = current_tc
+            self._consecutive_same_tc = 1
+        
+        # At 60fps/30tc (FRAME_RATE_MULTIPLIER=2):
+        #   - Seeing TC twice (consecutive_same_tc=2) is NORMAL
+        #   - Seeing TC 3+ times (consecutive_same_tc>=3) is a DROP
+        # The condition is: consecutive_same_tc > FRAME_RATE_MULTIPLIER
+        return self._consecutive_same_tc > FRAME_RATE_MULTIPLIER
+    
     def frames_are_duplicate(self, frame1: np.ndarray, frame2: np.ndarray) -> bool:
         """
-        Check if two frames are visual duplicates (physical drop).
+        LEGACY: Check if two frames are visual duplicates.
         
-        OPTIMISED: Use structural similarity on downscaled frames
+        This method is kept for compatibility but the preferred approach is
+        check_timecode_duplicate() which compares actual timecode values.
         """
-        # Downscale both frames for fast comparison
-        size = (64, 64)
-        small1 = cv2.resize(cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY), size, interpolation=cv2.INTER_AREA)
-        small2 = cv2.resize(cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY), size, interpolation=cv2.INTER_AREA)
+        if not self.roi_timecode:
+            size = (64, 64)
+            small1 = cv2.resize(cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY), size, interpolation=cv2.INTER_AREA)
+            small2 = cv2.resize(cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY), size, interpolation=cv2.INTER_AREA)
+            mse = np.mean((small1.astype(float) - small2.astype(float)) ** 2)
+            return mse < DUPLICATE_MSE_THRESHOLD
         
-        # Compute mean squared error
+        roi = self.roi_timecode
+        tc1 = frame1[roi['y']:roi['y']+roi['height'], roi['x']:roi['x']+roi['width']]
+        tc2 = frame2[roi['y']:roi['y']+roi['height'], roi['x']:roi['x']+roi['width']]
+        
+        gray1 = cv2.cvtColor(tc1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(tc2, cv2.COLOR_BGR2GRAY)
+        
+        size = (128, 32)
+        small1 = cv2.resize(gray1, size, interpolation=cv2.INTER_AREA)
+        small2 = cv2.resize(gray2, size, interpolation=cv2.INTER_AREA)
+        
         mse = np.mean((small1.astype(float) - small2.astype(float)) ** 2)
-        
-        # If MSE is very low, frames are duplicates
-        # Use configurable threshold
         return mse < DUPLICATE_MSE_THRESHOLD
     
     def frames_are_duplicate_fast(self, current_frame: np.ndarray) -> bool:
         """
-        Fast duplicate check using cached previous frame.
-        Call this instead of frames_are_duplicate for sequential processing.
+        LEGACY: Fast duplicate check using image comparison.
+        
+        This is a fallback method. The preferred approach is check_timecode_duplicate()
+        which is called from the analysis loop after OCR extraction.
         """
-        # Downscale current frame
-        size = (64, 64)
-        small_current = cv2.resize(
-            cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY), 
-            size, 
-            interpolation=cv2.INTER_AREA
-        )
+        if not self.roi_timecode:
+            size = (64, 64)
+            small_current = cv2.resize(
+                cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY), 
+                size, 
+                interpolation=cv2.INTER_AREA
+            )
+            
+            if self._prev_frame_small is None:
+                self._prev_frame_small = small_current
+                self._consecutive_duplicates = 0
+                return False
+            
+            mse = np.mean((small_current.astype(float) - self._prev_frame_small.astype(float)) ** 2)
+            is_same = mse < DUPLICATE_MSE_THRESHOLD
+            
+            if is_same:
+                self._consecutive_duplicates += 1
+            else:
+                self._consecutive_duplicates = 0
+                self._prev_frame_small = small_current
+            
+            return self._consecutive_duplicates >= FRAME_RATE_MULTIPLIER
+        
+        roi = self.roi_timecode
+        tc_region = current_frame[roi['y']:roi['y']+roi['height'], roi['x']:roi['x']+roi['width']]
+        gray = cv2.cvtColor(tc_region, cv2.COLOR_BGR2GRAY)
+        
+        size = (128, 32)
+        small_current = cv2.resize(gray, size, interpolation=cv2.INTER_AREA)
         
         if self._prev_frame_small is None:
             self._prev_frame_small = small_current
+            self._consecutive_duplicates = 0
             return False
         
-        # Compute mean squared error
         mse = np.mean((small_current.astype(float) - self._prev_frame_small.astype(float)) ** 2)
+        is_same = mse < DUPLICATE_MSE_THRESHOLD
         
-        # Update cache
-        self._prev_frame_small = small_current
+        if is_same:
+            self._consecutive_duplicates += 1
+        else:
+            self._consecutive_duplicates = 0
+            self._prev_frame_small = small_current
         
-        # Use configurable threshold - stricter to avoid false positives
-        return mse < DUPLICATE_MSE_THRESHOLD
+        return self._consecutive_duplicates >= FRAME_RATE_MULTIPLIER
 
 
 # =============================================================================
@@ -651,6 +740,11 @@ class VideoAnalyser:
         """
         Calibrate timecode detection on first frame.
         
+        Priority order:
+        1. Manual ROI passed as argument
+        2. ROI config file (roi_config.json) in video folder or parent
+        3. Auto-detection (fallback)
+        
         Args:
             manual_roi: Optional manual override for timecode ROI
                         Format: {'x': int, 'y': int, 'width': int, 'height': int}
@@ -659,13 +753,22 @@ class VideoAnalyser:
         if not self.reader:
             return False
         
-        # If manual ROI provided, use it directly
+        # Priority 1: Manual ROI argument
         if manual_roi:
             self.reader.roi_timecode = manual_roi
             self.reader.timecode_calibrated = True
             self.logger.info(f"Using manual timecode ROI: {manual_roi}")
             return True
         
+        # Priority 2: Load from config file
+        config_roi = self._load_roi_from_config()
+        if config_roi:
+            self.reader.roi_timecode = config_roi
+            self.reader.timecode_calibrated = True
+            self.logger.info(f"Loaded timecode ROI from config: {config_roi}")
+            return True
+        
+        # Priority 3: Auto-detection
         frame = self.reader.read_frame(0)
         if frame is None:
             self.logger.error("Cannot read first frame for calibration")
@@ -677,12 +780,39 @@ class VideoAnalyser:
         success = self.reader.auto_detect_timecode_roi(frame)
         if not success:
             self.logger.warning("Timecode ROI auto-detection failed, using fallback")
+            self.logger.warning("Consider running: python calibrate_roi.py /path/to/video.mov")
         
         # Save debug image showing ROI
         if save_debug and self.reader.roi_timecode:
             self._save_calibration_debug(frame)
         
         return True
+    
+    def _load_roi_from_config(self) -> Optional[Dict[str, int]]:
+        """Load ROI from roi_config.json if it exists"""
+        # Check video folder
+        video_folder = self.video_path.parent
+        
+        # Search locations: video folder, parent (take), grandparent (shot)
+        search_paths = [
+            video_folder / 'roi_config.json',
+            video_folder.parent / 'roi_config.json',
+            video_folder.parent.parent / 'roi_config.json',
+        ]
+        
+        for config_path in search_paths:
+            if config_path.exists():
+                try:
+                    with open(config_path, 'r') as f:
+                        config = json.load(f)
+                    roi = config.get('timecode_roi')
+                    if roi and all(k in roi for k in ['x', 'y', 'width', 'height']):
+                        self.logger.info(f"Found ROI config: {config_path}")
+                        return roi
+                except Exception as e:
+                    self.logger.warning(f"Error loading ROI config {config_path}: {e}")
+        
+        return None
     
     def _save_calibration_debug(self, frame: np.ndarray):
         """Save a debug image showing the detected ROI regions"""
@@ -763,20 +893,22 @@ class VideoAnalyser:
             # Create analysis record
             analysis = FrameAnalysis(frame_number=frame_num)
             
-            # OPTIMISED: Use fast duplicate check with caching
-            analysis.is_physical_duplicate = self.reader.frames_are_duplicate_fast(frame)
-            if analysis.is_physical_duplicate:
-                self.stats['physical_drops'] += 1
-            
             # Check drop indicator (has early-exit optimisation)
             analysis.drop_indicator_present = self.reader.detect_drop_indicator(frame)
             if analysis.drop_indicator_present:
                 self.stats['indicated_drops'] += 1
             
-            # Extract timecode
+            # Extract timecode via OCR
             tc, raw = self.reader.extract_timecode(frame)
             analysis.visual_timecode = tc
             analysis.visual_timecode_raw = raw
+            
+            # PRIMARY: Timecode-based duplicate detection
+            # Compares actual timecode values - more reliable than image comparison
+            # At 60fps/30tc, each TC appears twice (normal), 3+ times = drop
+            analysis.is_physical_duplicate = self.reader.check_timecode_duplicate(tc)
+            if analysis.is_physical_duplicate:
+                self.stats['physical_drops'] += 1
             
             # Compute frame hash (optimised - no PIL conversion)
             analysis.image_hash = self.reader.compute_frame_hash(frame)

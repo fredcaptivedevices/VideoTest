@@ -8,11 +8,42 @@ This system implements a comprehensive validation pipeline that:
 
 1. **Parses metadata** from JSON files containing frame counts, drop reports, and timecode information
 2. **Analyses video frames** using computer vision to detect:
-   - Visual timecode from digital slate displays (auto-detected ROI)
+   - Visual timecode from digital slate displays (Ambient LockitSlate Take2 or similar)
    - "Dropped frame" indicator overlays (fixed ROI in top-left corner)
-   - Physical frame duplicates (freeze frames indicating actual drops)
+   - Dropped frames via timecode value comparison
 3. **Applies Truth Table logic** to classify each frame and detect discrepancies
 4. **Generates detailed reports** in multiple formats (HTML, Text, JSON, CSV)
+
+## High Frame Rate Support
+
+The system is designed to work with high frame rate recordings where the video frame rate differs from the timecode rate.
+
+### Ambient LockitSlate Integration
+
+The [Ambient LockitSlate Take2](https://ambient.de) is a professional timecode slate that displays SMPTE timecode via LED display. Key characteristics:
+
+- Supports frame rates: 23.98, 24, 25, 29.97, 29.97DF, 30, 47.95, 48, 50, 59.94, 59.94DF, 60 FPS
+- LED digits update at the timecode rate, not the video capture rate
+- When shooting 60fps video with 30fps timecode, each timecode value appears on exactly 2 consecutive video frames
+
+### Frame Rate Multiplier
+
+The `FRAME_RATE_MULTIPLIER` constant controls expected duplicate behaviour:
+
+```python
+# In video_qa_validator.py
+FRAME_RATE_MULTIPLIER = 2  # 60fps video / 30fps timecode
+```
+
+| Video FPS | Timecode FPS | Multiplier | Expected Duplicates |
+|-----------|--------------|------------|---------------------|
+| 30 | 30 | 1 | 0 (each TC unique) |
+| 60 | 30 | 2 | 1 (pairs share TC) |
+| 120 | 30 | 4 | 3 (quads share TC) |
+
+**Detection Logic:**
+- At multiplier=2: Seeing the same timecode twice is NORMAL
+- At multiplier=2: Seeing the same timecode 3+ times indicates a DROPPED FRAME
 
 ## Installation
 
@@ -21,19 +52,46 @@ This system implements a comprehensive validation pipeline that:
 pip install -r requirements.txt
 
 # Ensure Tesseract OCR is installed
-# Ubuntu/Debian:
-sudo apt-get install tesseract-ocr
-
 # macOS:
 brew install tesseract
+
+# Ubuntu/Debian:
+sudo apt-get install tesseract-ocr
 
 # Windows:
 # Download from https://github.com/UB-Mannheim/tesseract/wiki
 ```
 
+See `SETUP_MACOS.md` for detailed macOS installation instructions.
+
 ## Usage
 
-### Command Line
+### Batch Validation (Recommended)
+
+The easiest way to validate multiple takes:
+
+```bash
+# Run from the video_qa_automation directory
+./validate.sh
+```
+
+This will:
+1. Discover all take folders under the current directory
+2. Group takes by shot (parent folder)
+3. Open the ROI calibration GUI once per shot
+4. Process all takes with the calibrated ROI
+5. Generate reports in each take folder
+
+### ROI Calibration
+
+The system requires you to manually select the timecode display region on the first frame of each shot:
+
+1. A GUI window opens showing the first frame
+2. Click and drag to draw a box around the timecode display
+3. Press ENTER to confirm, ESC to skip the shot
+4. The ROI is saved to `roi_config.json` and used for all takes in that shot
+
+### Command Line (Single Take)
 
 ```bash
 python video_qa_validator.py \
@@ -78,9 +136,29 @@ validator.run_full_validation()
 text_path, html_path = validator.generate_report()
 ```
 
-## Truth Table Logic
+## Duplicate Detection Method
 
-The system implements two primary logic gates for frame classification:
+### Primary: Timecode Value Comparison
+
+The system detects dropped frames by comparing **actual timecode values** extracted via OCR:
+
+```
+Frame 100: TC = 02:37:29:15 (first occurrence)
+Frame 101: TC = 02:37:29:15 (second occurrence - NORMAL at 60fps/30tc)
+Frame 102: TC = 02:37:29:15 (third occurrence - DROPPED FRAME!)
+Frame 103: TC = 02:37:29:16 (new timecode)
+```
+
+This approach is more reliable than image comparison because:
+- It ignores irrelevant visual changes (lighting, motion blur, noise)
+- It focuses on what actually matters: did the timecode advance?
+- It correctly handles the expected duplicate pattern at high frame rates
+
+### Fallback: Image Comparison
+
+If OCR fails, the system falls back to MSE (Mean Squared Error) comparison of the timecode region. This is less reliable and should be avoided by ensuring good ROI calibration.
+
+## Truth Table Logic
 
 ### Logic Gate 1: Continuity & Corruption
 
@@ -102,6 +180,37 @@ Cross-references physical frame state with indicator presence:
 | True | False | **DROPPED_UNDETECTED** (False Negative) |
 | False | True | **FALSE_POSITIVE** |
 | False | False | NORMAL |
+
+## Configuration
+
+### ROI Configuration File
+
+The ROI calibration tool saves settings to `roi_config.json`:
+
+```json
+{
+    "timecode_roi": {
+        "x": 465,
+        "y": 1404,
+        "width": 627,
+        "height": 146
+    },
+    "version": "1.0",
+    "note": "Generated by calibrate_roi.py - applies to all cameras in shot"
+}
+```
+
+### Frame Rate Configuration
+
+Edit the constant in `video_qa_validator.py`:
+
+```python
+# For 60fps video with 30fps timecode:
+FRAME_RATE_MULTIPLIER = 2
+
+# For 30fps video with 30fps timecode:
+FRAME_RATE_MULTIPLIER = 1
+```
 
 ## Metadata JSON Format
 
@@ -153,38 +262,13 @@ Detailed frame-by-frame analysis including:
 - Frame number
 - Visual timecode (OCR result)
 - Drop indicator status
-- Duplicate detection
+- Duplicate detection result
 - Classification status
-- Image hash
 - Notes
-
-## ROI Configuration
-
-### Drop Indicator (Fixed)
-The "Dropped frame" text overlay appears in a fixed position at the top-left corner:
-```python
-ROI_DROP = {
-    'x': 0,
-    'y': 0,
-    'width': 250,
-    'height': 50
-}
-```
-
-### Timecode (Auto-Detected)
-The timecode display position varies per take. The system automatically detects the digital slate location on the first frame by scanning for the pattern `##:##:##:##`.
-
-## Validation Checks
-
-1. **Sync Status**: Verifies Camera A and B have identical Frame 0 timecodes
-2. **Corruption Status**: Cross-references vision-detected corruptions with metadata flags
-3. **Drop Frame Accuracy**: Compares detected physical drops against metadata counts
-4. **Start Timecode**: Validates OCR Frame 0 matches metadata start timecode
-5. **Indicator Health**: Reports false negatives and false positives
 
 ## Debug Mode
 
-When `--debug` is enabled, the system saves annotated screenshots of any frame classified as:
+When `--debug` is enabled or `DEBUG = True` in the code, the system saves annotated screenshots of any frame classified as:
 - CORRUPTION
 - DROPPED_UNDETECTED (False Negative)
 - FALSE_POSITIVE
@@ -195,24 +279,19 @@ Screenshots are saved to `debug_frames/` with naming convention:
 cam{A|B}_frame{NNNNNN}_{STATUS}.png
 ```
 
-## Dependencies
-
-- `opencv-python>=4.8.0` - Video processing and image analysis
-- `numpy>=1.24.0` - Numerical operations
-- `Pillow>=10.0.0` - Image handling
-- `pytesseract>=0.3.10` - OCR engine wrapper
-- `imagehash>=4.3.1` - Perceptual hashing for duplicate detection
-- `pandas>=2.0.0` - Data analysis and CSV generation
-
-## Architecture
+## Project Structure
 
 ```
 video_qa_automation/
-├── video_qa_validator.py   # Main application
+├── video_qa_validator.py   # Main validation engine
+├── batch_validate.py       # Batch processing for multiple takes
+├── calibrate_roi.py        # GUI tool for ROI selection
+├── validate.sh             # Shell script runner
 ├── test_runner.py          # Unit tests and demo
 ├── config.json             # Configuration settings
 ├── requirements.txt        # Python dependencies
 ├── README.md               # This documentation
+├── SETUP_MACOS.md          # macOS installation guide
 ├── qa_reports/             # Generated reports (output)
 └── debug_frames/           # Flagged frame screenshots (debug)
 ```
@@ -222,31 +301,39 @@ video_qa_automation/
 - **Timecode**: SMPTE timecode representation and arithmetic
 - **FrameAnalysis**: Per-frame analysis result container
 - **CameraMetadata**: JSON metadata parser
-- **FrameReader**: Video I/O and vision pipeline
+- **FrameReader**: Video I/O, OCR, and duplicate detection
 - **VideoAnalyser**: Single-camera analysis engine
 - **DualCameraValidator**: Orchestrates dual-stream validation
 
-## Performance Considerations
+## Dependencies
 
-- Frame hashing uses average hash (aHash) for speed
-- Timecode ROI is locked after first-frame calibration
-- Progress callbacks available for UI integration
-- OCR scaling improves accuracy at cost of speed
+- `opencv-python>=4.8.0` - Video processing and image analysis
+- `numpy>=1.24.0` - Numerical operations
+- `Pillow>=10.0.0` - Image handling
+- `pytesseract>=0.3.10` - OCR engine wrapper
+- `pandas>=2.0.0` - Data analysis and CSV generation
 
 ## Troubleshooting
 
 ### OCR Failures
 - Ensure Tesseract is installed and in PATH
-- Check timecode display is visible and well-lit
-- Adjust threshold values in config.json
+- Check timecode display is visible and well-lit in the ROI
+- Verify ROI calibration covers the entire timecode display
+- Try adjusting LED brightness on the LockitSlate
 
 ### False Duplicates
-- Increase `duplicate_frame_hash_distance` threshold
-- Check for compression artefacts in source video
+- Verify `FRAME_RATE_MULTIPLIER` matches your recording setup
+- Check ROI is correctly positioned on the timecode digits
+- Ensure OCR is successfully reading timecodes (check raw OCR output)
 
 ### Missing Drop Indicators
-- Verify ROI_DROP coordinates match actual overlay position
-- Check indicator brightness threshold
+- Verify `ROI_DROP` coordinates match actual overlay position
+- Check indicator brightness threshold in the code
+
+### ROI Calibration Issues
+- Ensure the first frame of each shot shows the slate clearly
+- Draw the ROI box tightly around just the timecode digits
+- Include a small margin (10px padding is added automatically)
 
 ## Licence
 
@@ -254,4 +341,6 @@ Proprietary - Captive Devices Ltd.
 
 ## Version History
 
+- **1.2.0** - Timecode-based duplicate detection, high frame rate support
+- **1.1.0** - ROI calibration GUI, batch processing
 - **1.0.0** - Initial release with dual-camera validation support

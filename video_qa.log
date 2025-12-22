@@ -1,86 +1,44 @@
-2025-12-21 23:37:34,084 - main - INFO - Starting batch validation of: /Users/fredisaac/CaptiveQA/data
-2025-12-21 23:37:34,084 - BatchValidator - INFO - Found 5 takes to process
-2025-12-21 23:37:34,084 - BatchValidator - INFO - [1/5] pull3/Take_001
-2025-12-21 23:37:34,085 - BatchValidator - INFO - Processing: Take_001
-2025-12-21 23:37:34,085 - DualCameraValidator - INFO - ============================================================
-2025-12-21 23:37:34,085 - DualCameraValidator - INFO - Starting Dual Camera Validation
-2025-12-21 23:37:34,085 - DualCameraValidator - INFO - ============================================================
-2025-12-21 23:37:34,085 - VideoAnalyser_A - INFO - Loaded metadata: pull3_Take_001_left.mov
-2025-12-21 23:37:34,085 - VideoAnalyser_A - INFO -   Reported drops: 0
-2025-12-21 23:37:34,085 - VideoAnalyser_A - INFO -   Start TC: 02:34:52:00
-2025-12-21 23:37:34,096 - FrameReader_A - INFO - Opened video: pull3_Take_001_left.mov
-2025-12-21 23:37:34,096 - FrameReader_A - INFO -   Frames: 7840, FPS: 60.0
-2025-12-21 23:37:34,096 - FrameReader_A - INFO -   Resolution: 1600x2472
-2025-12-21 23:37:34,096 - VideoAnalyser_B - INFO - Loaded metadata: pull3_Take_001_right.mov
-2025-12-21 23:37:34,096 - VideoAnalyser_B - INFO -   Reported drops: 0
-2025-12-21 23:37:34,097 - VideoAnalyser_B - INFO -   Start TC: 02:34:52:00
-2025-12-21 23:37:34,097 - FrameReader_B - INFO - Opened video: pull3_Take_001_right.mov
-2025-12-21 23:37:34,097 - FrameReader_B - INFO -   Frames: 7840, FPS: 60.0
-2025-12-21 23:37:34,097 - FrameReader_B - INFO -   Resolution: 1600x2472
-2025-12-21 23:37:36,342 - FrameReader_A - INFO - Timecode ROI detected: {'x': 380, 'y': 598, 'width': 840, 'height': 1276}
-2025-12-21 23:38:14,275 - FrameReader_B - WARNING - Auto-detection failed, using full-frame scan
-2025-12-21 23:38:14,276 - VideoAnalyser_B - WARNING - Timecode ROI auto-detection failed, using fallback
-2025-12-21 23:38:14,276 - DualCameraValidator - INFO - Analysing Camera A...
-2025-12-21 23:38:14,276 - VideoAnalyser_A - INFO - Starting analysis of 7840 frames...
-2025-12-21 23:53:38,110 - main - INFO - Starting batch validation of: /Users/fredisaac/CaptiveQA/data
-2025-12-21 23:53:38,111 - BatchValidator - INFO - Processing: Take_001
-2025-12-21 23:53:38,111 - DualCameraValidator - INFO - ============================================================
-2025-12-21 23:53:38,111 - DualCameraValidator - INFO - Starting Dual Camera Validation
-2025-12-21 23:53:38,111 - DualCameraValidator - INFO - ============================================================
-2025-12-21 23:53:38,112 - VideoAnalyser_A - INFO - Loaded metadata: pull3_Take_001_left.mov
-2025-12-21 23:53:38,112 - VideoAnalyser_A - INFO -   Reported drops: 0
-2025-12-21 23:53:38,112 - VideoAnalyser_A - INFO -   Start TC: 02:34:52:00
-2025-12-21 23:53:38,133 - FrameReader_A - INFO - Opened video: pull3_Take_001_left.mov
-2025-12-21 23:53:38,133 - FrameReader_A - INFO -   Frames: 7840, FPS: 60.0
-2025-12-21 23:53:38,133 - FrameReader_A - INFO -   Resolution: 1600x2472
-2025-12-21 23:53:38,133 - VideoAnalyser_B - INFO - Loaded metadata: pull3_Take_001_right.mov
-2025-12-21 23:53:38,133 - VideoAnalyser_B - INFO -   Reported drops: 0
-2025-12-21 23:53:38,133 - VideoAnalyser_B - INFO -   Start TC: 02:34:52:00
-2025-12-21 23:53:38,134 - FrameReader_B - INFO - Opened video: pull3_Take_001_right.mov
-2025-12-21 23:53:38,134 - FrameReader_B - INFO -   Frames: 7840, FPS: 60.0
-2025-12-21 23:53:38,134 - FrameReader_B - INFO -   Resolution: 1600x2472
-2025-12-21 23:53:38,605 - FrameReader_A - INFO - Timecode ROI detected: {'x': 380, 'y': 598, 'width': 840, 'height': 1276}
-2025-12-21 23:54:15,817 - FrameReader_B - WARNING - Auto-detection failed, using full-frame scan
-2025-12-21 23:54:15,818 - VideoAnalyser_B - WARNING - Timecode ROI auto-detection failed, using fallback
-2025-12-21 23:54:15,818 - VideoAnalyser_A - INFO - Starting analysis of 7840 frames...
-2025-12-22 00:00:24,857 - main - INFO - Starting batch validation of: /Users/fredisaac/CaptiveQA/data
-2025-12-22 00:00:24,858 - BatchValidator - INFO - Processing: Take_001
-2025-12-22 00:00:24,858 - DualCameraValidator - INFO - ============================================================
-2025-12-22 00:00:24,858 - DualCameraValidator - INFO - Starting Dual Camera Validation
-2025-12-22 00:00:24,858 - DualCameraValidator - INFO - ============================================================
-2025-12-22 00:00:24,859 - VideoAnalyser_A - INFO - Loaded metadata: pull3_Take_001_left.mov
-2025-12-22 00:00:24,859 - VideoAnalyser_A - INFO -   Reported drops: 0
-2025-12-22 00:00:24,859 - VideoAnalyser_A - INFO -   Start TC: 02:34:52:00
-2025-12-22 00:00:24,881 - FrameReader_A - INFO - Opened video: pull3_Take_001_left.mov
-2025-12-22 00:00:24,881 - FrameReader_A - INFO -   Frames: 7840, FPS: 60.0
-2025-12-22 00:00:24,881 - FrameReader_A - INFO -   Resolution: 1600x2472
-2025-12-22 00:00:24,881 - VideoAnalyser_B - INFO - Loaded metadata: pull3_Take_001_right.mov
-2025-12-22 00:00:24,881 - VideoAnalyser_B - INFO -   Reported drops: 0
-2025-12-22 00:00:24,881 - VideoAnalyser_B - INFO -   Start TC: 02:34:52:00
-2025-12-22 00:00:24,882 - FrameReader_B - INFO - Opened video: pull3_Take_001_right.mov
-2025-12-22 00:00:24,882 - FrameReader_B - INFO -   Frames: 7840, FPS: 60.0
-2025-12-22 00:00:24,882 - FrameReader_B - INFO -   Resolution: 1600x2472
-2025-12-22 00:00:48,267 - FrameReader_A - WARNING - Auto-detection failed, using default right-side ROI
-2025-12-22 00:00:48,268 - VideoAnalyser_A - WARNING - Timecode ROI auto-detection failed, using fallback
-2025-12-22 00:01:12,195 - FrameReader_B - WARNING - Auto-detection failed, using default right-side ROI
-2025-12-22 00:01:12,197 - VideoAnalyser_B - WARNING - Timecode ROI auto-detection failed, using fallback
-2025-12-22 00:01:12,197 - VideoAnalyser_A - INFO - Starting analysis of 7840 frames...
-2025-12-22 00:09:23,019 - main - INFO - Starting batch validation of: /Users/fredisaac/CaptiveQA/data
-2025-12-22 00:09:23,021 - BatchValidator - INFO - Processing: Take_001
-2025-12-22 00:09:23,021 - DualCameraValidator - INFO - ============================================================
-2025-12-22 00:09:23,021 - DualCameraValidator - INFO - Starting Dual Camera Validation
-2025-12-22 00:09:23,021 - DualCameraValidator - INFO - ============================================================
-2025-12-22 00:09:23,022 - VideoAnalyser_A - INFO - Loaded metadata: pull3_Take_001_left.mov
-2025-12-22 00:09:23,022 - VideoAnalyser_A - INFO -   Reported drops: 0
-2025-12-22 00:09:23,022 - VideoAnalyser_A - INFO -   Start TC: 02:34:52:00
-2025-12-22 00:09:23,044 - FrameReader_A - INFO - Opened video: pull3_Take_001_left.mov
-2025-12-22 00:09:23,044 - FrameReader_A - INFO -   Frames: 7840, FPS: 60.0
-2025-12-22 00:09:23,044 - FrameReader_A - INFO -   Resolution: 1600x2472
-2025-12-22 00:09:23,044 - VideoAnalyser_B - INFO - Loaded metadata: pull3_Take_001_right.mov
-2025-12-22 00:09:23,044 - VideoAnalyser_B - INFO -   Reported drops: 0
-2025-12-22 00:09:23,044 - VideoAnalyser_B - INFO -   Start TC: 02:34:52:00
-2025-12-22 00:09:23,045 - FrameReader_B - INFO - Opened video: pull3_Take_001_right.mov
-2025-12-22 00:09:23,045 - FrameReader_B - INFO -   Frames: 7840, FPS: 60.0
-2025-12-22 00:09:23,045 - FrameReader_B - INFO -   Resolution: 1600x2472
-2025-12-22 00:09:23,079 - FrameReader_A - INFO - Auto-detecting timecode ROI in 1600x2472 frame...
-2025-12-22 00:09:25,917 - FrameReader_A - INFO - Bright region detection failed, trying grid scan...
+2025-12-22 00:36:09,476 - main - INFO - Starting batch validation of: /Users/fredisaac/CaptiveQA/data
+2025-12-22 00:36:13,864 - BatchValidator - INFO - Processing: Take_003
+2025-12-22 00:36:13,865 - DualCameraValidator - INFO - ============================================================
+2025-12-22 00:36:13,865 - DualCameraValidator - INFO - Starting Dual Camera Validation
+2025-12-22 00:36:13,865 - DualCameraValidator - INFO - ============================================================
+2025-12-22 00:36:13,866 - VideoAnalyser_A - INFO - Loaded metadata: pull3_Take_003_left.mov
+2025-12-22 00:36:13,866 - VideoAnalyser_A - INFO -   Reported drops: 0
+2025-12-22 00:36:13,866 - VideoAnalyser_A - INFO -   Start TC: 02:39:56:00
+2025-12-22 00:36:13,867 - FrameReader_A - INFO - Opened video: pull3_Take_003_left.mov
+2025-12-22 00:36:13,867 - FrameReader_A - INFO -   Frames: 7460, FPS: 60.0
+2025-12-22 00:36:13,867 - FrameReader_A - INFO -   Resolution: 1600x2472
+2025-12-22 00:36:13,868 - VideoAnalyser_B - INFO - Loaded metadata: pull3_Take_003_right.mov
+2025-12-22 00:36:13,868 - VideoAnalyser_B - INFO -   Reported drops: 0
+2025-12-22 00:36:13,868 - VideoAnalyser_B - INFO -   Start TC: 02:39:56:00
+2025-12-22 00:36:13,870 - FrameReader_B - INFO - Opened video: pull3_Take_003_right.mov
+2025-12-22 00:36:13,870 - FrameReader_B - INFO -   Frames: 7460, FPS: 60.0
+2025-12-22 00:36:13,870 - FrameReader_B - INFO -   Resolution: 1600x2472
+2025-12-22 00:36:13,870 - VideoAnalyser_A - INFO - Found ROI config: /Users/fredisaac/CaptiveQA/data/pull3/roi_config.json
+2025-12-22 00:36:13,870 - VideoAnalyser_A - INFO - Loaded timecode ROI from config: {'x': 682, 'y': 1390, 'width': 679, 'height': 257}
+2025-12-22 00:36:13,871 - VideoAnalyser_B - INFO - Found ROI config: /Users/fredisaac/CaptiveQA/data/pull3/roi_config.json
+2025-12-22 00:36:13,871 - VideoAnalyser_B - INFO - Loaded timecode ROI from config: {'x': 682, 'y': 1390, 'width': 679, 'height': 257}
+2025-12-22 00:36:13,871 - VideoAnalyser_A - INFO - Starting analysis of 7460 frames...
+2025-12-22 00:38:10,107 - main - INFO - Starting batch validation of: /Users/fredisaac/CaptiveQA/data
+2025-12-22 00:38:14,928 - BatchValidator - INFO - Processing: Take_002
+2025-12-22 00:38:14,929 - DualCameraValidator - INFO - ============================================================
+2025-12-22 00:38:14,929 - DualCameraValidator - INFO - Starting Dual Camera Validation
+2025-12-22 00:38:14,929 - DualCameraValidator - INFO - ============================================================
+2025-12-22 00:38:14,929 - VideoAnalyser_A - INFO - Loaded metadata: pull3_Take_002_left.mov
+2025-12-22 00:38:14,929 - VideoAnalyser_A - INFO -   Reported drops: 0
+2025-12-22 00:38:14,929 - VideoAnalyser_A - INFO -   Start TC: 02:37:21:00
+2025-12-22 00:38:14,931 - FrameReader_A - INFO - Opened video: pull3_Take_002_left.mov
+2025-12-22 00:38:14,931 - FrameReader_A - INFO -   Frames: 400, FPS: 60.0
+2025-12-22 00:38:14,931 - FrameReader_A - INFO -   Resolution: 1600x2472
+2025-12-22 00:38:14,931 - VideoAnalyser_B - INFO - Loaded metadata: pull3_Take_002_right.mov
+2025-12-22 00:38:14,931 - VideoAnalyser_B - INFO -   Reported drops: 0
+2025-12-22 00:38:14,931 - VideoAnalyser_B - INFO -   Start TC: 02:37:21:00
+2025-12-22 00:38:14,933 - FrameReader_B - INFO - Opened video: pull3_Take_002_right.mov
+2025-12-22 00:38:14,933 - FrameReader_B - INFO -   Frames: 520, FPS: 60.0
+2025-12-22 00:38:14,933 - FrameReader_B - INFO -   Resolution: 1600x2472
+2025-12-22 00:38:14,933 - VideoAnalyser_A - INFO - Found ROI config: /Users/fredisaac/CaptiveQA/data/pull3/roi_config.json
+2025-12-22 00:38:14,933 - VideoAnalyser_A - INFO - Loaded timecode ROI from config: {'x': 437, 'y': 1327, 'width': 663, 'height': 273}
+2025-12-22 00:38:14,934 - VideoAnalyser_B - INFO - Found ROI config: /Users/fredisaac/CaptiveQA/data/pull3/roi_config.json
+2025-12-22 00:38:14,934 - VideoAnalyser_B - INFO - Loaded timecode ROI from config: {'x': 437, 'y': 1327, 'width': 663, 'height': 273}
+2025-12-22 00:38:14,934 - VideoAnalyser_A - INFO - Starting analysis of 400 frames...
