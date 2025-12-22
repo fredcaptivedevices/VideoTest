@@ -77,7 +77,7 @@ ROI_DROP = {
 }
 
 # Debug: Save OCR input images for troubleshooting
-DEBUG_OCR = True  # Set to True to save OCR debug images
+DEBUG_OCR = False  # Set to True to save OCR debug images (SLOW - disk I/O)
 DEBUG_OCR_DIR = Path("debug_ocr")
 
 # Timecode pattern for OCR validation
@@ -605,174 +605,231 @@ class FrameReader:
         """
         Extract timecode from frame using EasyOCR.
         Returns tuple of (Timecode object, raw OCR text).
-        
-        Optimised for white dot-matrix LED displays on monochrome footage.
+
+        OPTIMISED for speed and accuracy:
+        - ROI-level caching to skip OCR on identical frames (major speedup)
+        - Smart threshold selection based on LED brightness (avoids 5x OCR overhead)
+        - CLAHE contrast enhancement for low-light displays
+        - Caching of last successful threshold method
+        - Early exit on successful OCR
         """
         if not self.roi_timecode:
             return None, ""
-        
+
         # Extract ROI
         roi = frame[
             self.roi_timecode['y']:self.roi_timecode['y'] + self.roi_timecode['height'],
             self.roi_timecode['x']:self.roi_timecode['x'] + self.roi_timecode['width']
         ]
-        
+
+        # OPTIMIZATION: ROI-level caching to skip OCR on nearly identical frames
+        # Compute a fast hash of the ROI to detect unchanged timecode regions
+        if not hasattr(self, '_roi_cache'):
+            self._roi_cache = {'hash': None, 'result': (None, "")}
+
+        # Compute simple hash: mean + std of ROI (very fast)
+        roi_hash = (int(np.mean(roi)), int(np.std(roi)))
+        if roi_hash == self._roi_cache['hash']:
+            # ROI is identical to previous frame - return cached result
+            return self._roi_cache['result']
+
         # For monochrome footage, all channels are the same
-        # Use grayscale directly
         if len(roi.shape) == 3:
             gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         else:
             gray = roi.copy()
-        
-        # Step 1: Apply strong Gaussian blur to fuse the dot-matrix LED dots
-        # Use larger kernel for better dot fusion
-        blur_kernel = 7  # Larger kernel for better fusion
+
+        # OPTIMIZATION: Check if ROI is too dark (no LED visible) - skip OCR entirely
+        mean_brightness = np.mean(gray)
+        if mean_brightness < 10:
+            result = (None, "")
+            self._roi_cache = {'hash': roi_hash, 'result': result}
+            return result
+
+        # OPTIMIZATION: Apply CLAHE for better contrast on dim displays
+        if mean_brightness < 80:
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
+            gray = clahe.apply(gray)
+
+        # Step 1: Apply Gaussian blur to fuse dot-matrix LED dots
+        blur_kernel = 5  # Slightly smaller for speed, still effective
         blurred = cv2.GaussianBlur(gray, (blur_kernel, blur_kernel), 0)
-        
-        # Step 2: Apply morphological closing to further connect dots
-        # This helps fill gaps between LED dots
+
+        # Morphological kernel for closing operations
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        
-        # Debug: Save first few ROI images to help troubleshoot OCR issues
+
+        # Debug: Save first few ROI images (only when DEBUG_OCR is enabled)
         if DEBUG_OCR:
             if not hasattr(self, '_debug_ocr_count'):
                 self._debug_ocr_count = 0
             self._debug_ocr_count += 1
-            if self._debug_ocr_count <= 10:  # Save first 10 frames only
+            if self._debug_ocr_count <= 10:
                 try:
                     DEBUG_OCR_DIR.mkdir(exist_ok=True)
                     cv2.imwrite(str(DEBUG_OCR_DIR / f"cam{self.camera_id}_frame{self._debug_ocr_count:04d}_1_roi.png"), roi)
                     cv2.imwrite(str(DEBUG_OCR_DIR / f"cam{self.camera_id}_frame{self._debug_ocr_count:04d}_2_gray.png"), gray)
-                    cv2.imwrite(str(DEBUG_OCR_DIR / f"cam{self.camera_id}_frame{self._debug_ocr_count:04d}_3_blurred.png"), blurred)
                 except Exception as e:
                     self.logger.debug(f"Failed to save debug OCR image: {e}")
-        
-        # Try multiple preprocessing approaches optimised for white LED on dark background
+
+        # OPTIMIZATION: Smart threshold selection based on brightness
+        # Instead of trying all 5 thresholds, select 1-2 based on image characteristics
+        max_val = np.max(blurred)
+
+        # Initialize cache for last successful threshold method
+        if not hasattr(self, '_last_successful_thresh'):
+            self._last_successful_thresh = None
+
         images_to_try = []
-        
-        # Method 1: Blur + High threshold (for bright LEDs)
-        _, thresh1 = cv2.threshold(blurred, 200, 255, cv2.THRESH_BINARY)
-        thresh1 = cv2.morphologyEx(thresh1, cv2.MORPH_CLOSE, kernel)
-        images_to_try.append(('thresh200', thresh1))
-        
-        # Method 2: Blur + Medium threshold
-        _, thresh2 = cv2.threshold(blurred, 180, 255, cv2.THRESH_BINARY)
-        thresh2 = cv2.morphologyEx(thresh2, cv2.MORPH_CLOSE, kernel)
-        images_to_try.append(('thresh180', thresh2))
-        
-        # Method 3: Blur + Lower threshold
-        _, thresh3 = cv2.threshold(blurred, 150, 255, cv2.THRESH_BINARY)
-        thresh3 = cv2.morphologyEx(thresh3, cv2.MORPH_CLOSE, kernel)
-        images_to_try.append(('thresh150', thresh3))
-        
-        # Method 4: Blur + OTSU auto-threshold
-        _, thresh4 = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        thresh4 = cv2.morphologyEx(thresh4, cv2.MORPH_CLOSE, kernel)
-        images_to_try.append(('otsu', thresh4))
-        
-        # Method 5: Adaptive threshold on blurred image
-        thresh5 = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                         cv2.THRESH_BINARY, 21, -5)
-        thresh5 = cv2.morphologyEx(thresh5, cv2.MORPH_CLOSE, kernel)
-        images_to_try.append(('adaptive', thresh5))
-        
-        # Debug: Save threshold images for first few frames
-        if DEBUG_OCR and hasattr(self, '_debug_ocr_count') and self._debug_ocr_count <= 5:
-            try:
-                for name, img in images_to_try:
-                    cv2.imwrite(str(DEBUG_OCR_DIR / f"cam{self.camera_id}_frame{self._debug_ocr_count:04d}_4_{name}.png"), img)
-            except Exception as e:
-                self.logger.debug(f"Failed to save debug threshold image: {e}")
-        
-        # Try each preprocessed image
+
+        # If we have a cached successful method, try it first
+        if self._last_successful_thresh:
+            thresh_val = self._last_successful_thresh
+            if thresh_val == 'otsu':
+                _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            else:
+                _, thresh = cv2.threshold(blurred, thresh_val, 255, cv2.THRESH_BINARY)
+            thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+            images_to_try.append((self._last_successful_thresh, thresh))
+
+        # Smart threshold selection based on max brightness
+        if max_val > 200:
+            # Bright LED - use high threshold
+            if self._last_successful_thresh != 200:
+                _, thresh = cv2.threshold(blurred, 200, 255, cv2.THRESH_BINARY)
+                thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+                images_to_try.append((200, thresh))
+        elif max_val > 150:
+            # Medium brightness - use medium threshold
+            if self._last_successful_thresh != 170:
+                _, thresh = cv2.threshold(blurred, 170, 255, cv2.THRESH_BINARY)
+                thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+                images_to_try.append((170, thresh))
+        else:
+            # Dim LED - use OTSU auto-threshold
+            if self._last_successful_thresh != 'otsu':
+                _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+                images_to_try.append(('otsu', thresh))
+
+        # Fallback: add one additional method if primary fails
+        if len(images_to_try) < 2:
+            _, thresh = cv2.threshold(blurred, 150, 255, cv2.THRESH_BINARY)
+            thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+            images_to_try.append((150, thresh))
+
+        # Try each preprocessed image with early exit
         all_raw_texts = []
-        for name, img in images_to_try:
+        for thresh_id, img in images_to_try:
             tc, raw = self._ocr_timecode_easyocr(img)
             if tc is not None:
-                return tc, raw
+                # Cache successful threshold method for next frame
+                self._last_successful_thresh = thresh_id
+                # Update ROI cache with successful result
+                result = (tc, raw)
+                self._roi_cache = {'hash': roi_hash, 'result': result}
+                return result
             if raw:
                 all_raw_texts.append(raw)
-        
+
+        # Clear cache on failure (conditions may have changed)
+        self._last_successful_thresh = None
+
         # Return best raw text even if parsing failed
-        return None, all_raw_texts[0] if all_raw_texts else ""
+        result = (None, all_raw_texts[0] if all_raw_texts else "")
+        # Cache the result even on failure (frame may be genuinely unreadable)
+        self._roi_cache = {'hash': roi_hash, 'result': result}
+        return result
     
     def _ocr_timecode_easyocr(self, img: np.ndarray) -> Tuple[Optional[Timecode], str]:
-        """Perform OCR using EasyOCR and parse timecode"""
+        """
+        Perform OCR using EasyOCR and parse timecode.
+
+        OPTIMISED:
+        - 4x scaling for better dot-matrix recognition
+        - EasyOCR accepts grayscale directly (no BGR conversion needed)
+        - Improved character correction mappings
+        """
         try:
             reader = get_ocr_reader()
-            
-            # Scale up significantly for better recognition of dot-matrix displays
-            # Larger scale helps EasyOCR see the digit shapes clearly
-            scale = 3
+
+            # OPTIMIZATION: Scale up 4x for better dot-matrix digit recognition
+            # Larger scale helps EasyOCR distinguish individual LED dots as solid digits
+            scale = 4
             img_scaled = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-            
-            # If grayscale, convert to BGR for EasyOCR
-            if len(img_scaled.shape) == 2:
-                img_for_ocr = cv2.cvtColor(img_scaled, cv2.COLOR_GRAY2BGR)
-            else:
-                img_for_ocr = img_scaled
-            
+
+            # OPTIMIZATION: EasyOCR accepts grayscale images directly
+            # No need to convert to BGR - saves memory allocation and copy
+            img_for_ocr = img_scaled
+
             img_height = img_for_ocr.shape[0]
-            
-            # Run EasyOCR - allowlist only digits and colon
+
+            # Run EasyOCR - allowlist digits, colon, and common misread characters
+            # Adding ; helps catch colon misreads
             results = reader.readtext(
                 img_for_ocr,
-                allowlist='0123456789:',
+                allowlist='0123456789:;.',
                 paragraph=False,
                 detail=1,
-                width_ths=0.7,
-                height_ths=0.7
+                width_ths=0.8,  # Slightly more lenient for grouped digits
+                height_ths=0.8,
+                low_text=0.3,   # Lower threshold to catch dim digits
             )
-            
+
             if not results:
                 return None, ""
-            
+
             # Filter results: only keep text from the UPPER portion of the ROI
             # The timecode display is at the top, labels like SCENE/SHOT are below
             upper_threshold = img_height * 0.5  # Only look at top 50% of ROI
-            
+
             filtered_results = []
             for (bbox, text, confidence) in results:
                 # bbox is [[x1,y1], [x2,y1], [x2,y2], [x1,y2]]
-                # Get the center Y position of this text
                 center_y = (bbox[0][1] + bbox[2][1]) / 2
-                
+
                 # Only include if in upper portion of image
                 if center_y < upper_threshold and confidence > 0.1:
-                    # Additional filter: skip very short single characters that aren't digits
                     clean_text = text.strip()
                     if len(clean_text) >= 1:
                         filtered_results.append((bbox, text, confidence))
-            
+
             if not filtered_results:
                 # Fallback: try all results if filtering removed everything
                 filtered_results = [(b, t, c) for b, t, c in results if c > 0.1]
-            
+
             # Sort by x-position (left to right)
             sorted_results = sorted(filtered_results, key=lambda r: r[0][0][0])
-            
+
             # Combine text
             raw_parts = []
             for (bbox, text, confidence) in sorted_results:
                 raw_parts.append(text)
-            
+
             raw_text = ''.join(raw_parts)
-            
-            # Clean up common OCR errors for dot-matrix displays
-            raw_text = raw_text.replace('.', ':').replace(' ', '')
-            raw_text = raw_text.replace('O', '0').replace('o', '0')
-            raw_text = raw_text.replace('l', '1').replace('I', '1').replace('|', '1')
-            raw_text = raw_text.replace('S', '5').replace('s', '5')
-            raw_text = raw_text.replace('B', '8').replace('G', '6')
-            raw_text = raw_text.replace('Z', '2').replace('z', '2')
-            raw_text = raw_text.replace('A', '4').replace('g', '9')
-            raw_text = raw_text.replace('D', '0').replace('Q', '0')
-            raw_text = raw_text.replace('T', '1').replace('i', '1')
-            
+
+            # IMPROVED: Comprehensive character correction for dot-matrix displays
+            # Normalize separators first
+            raw_text = raw_text.replace(';', ':').replace('.', ':').replace(' ', '')
+
+            # Common letter-to-digit misreads (expanded set)
+            char_corrections = {
+                'O': '0', 'o': '0', 'D': '0', 'Q': '0', 'C': '0',
+                'l': '1', 'I': '1', '|': '1', 'T': '1', 'i': '1', 'L': '1', '!': '1', 'J': '1',
+                'Z': '2', 'z': '2',
+                'E': '3',
+                'A': '4', 'H': '4', 'h': '4',
+                'S': '5', 's': '5',
+                'G': '6', 'b': '6',
+                'B': '8',
+                'g': '9', 'q': '9', 'P': '9', 'p': '9',
+            }
+            for char, digit in char_corrections.items():
+                raw_text = raw_text.replace(char, digit)
+
             # Try to parse timecode
             tc = Timecode.from_string(raw_text)
             return tc, raw_text
-            
+
         except Exception as e:
             self.logger.debug(f"EasyOCR error: {e}")
             return None, ""
