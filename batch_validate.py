@@ -141,8 +141,16 @@ class BatchValidator:
         
         self.results: List[Dict] = []
     
-    def validate_single_take(self, take_path: Path, debug: bool = False) -> Optional[Dict]:
-        """Validate a single take and return results"""
+    def validate_single_take(self, take_path: Path, debug: bool = False, 
+                              roi_config: Optional[Dict] = None) -> Optional[Dict]:
+        """
+        Validate a single take and return results.
+        
+        Args:
+            take_path: Path to the take folder
+            debug: Enable debug frame saving
+            roi_config: ROI configuration with 'roi_a' and 'roi_b' keys for each camera
+        """
         files = self.discovery.get_take_files(take_path)
         if not files:
             return None
@@ -154,13 +162,28 @@ class BatchValidator:
         take_output = take_path / "qa_reports"
         take_output.mkdir(exist_ok=True)
         
+        # Extract per-camera ROIs from config
+        roi_a = None
+        roi_b = None
+        if roi_config:
+            # New format with separate ROIs
+            if 'roi_a' in roi_config:
+                roi_a = roi_config['roi_a']
+                roi_b = roi_config.get('roi_b', roi_config['roi_a'])  # Fallback to A if B missing
+            # Legacy format with single ROI
+            elif 'timecode_roi' in roi_config:
+                roi_a = roi_config['timecode_roi']
+                roi_b = roi_config['timecode_roi']
+        
         try:
             validator = DualCameraValidator(
                 video_a=files['video_a'],
                 video_b=files['video_b'],
                 metadata_a=files['metadata_a'],
                 metadata_b=files['metadata_b'],
-                output_dir=take_output
+                output_dir=take_output,
+                roi_a=roi_a,
+                roi_b=roi_b
             )
             
             # Show which files we're processing
@@ -304,7 +327,7 @@ class BatchValidator:
                 print(f"[{i}/{len(shot_takes)}] {rel_path}")
                 print(f"{'─'*60}")
                 
-                result = self.validate_single_take(take_path, debug=debug)
+                result = self.validate_single_take(take_path, debug=debug, roi_config=roi_config)
                 if result:
                     self.results.append(result)
         
@@ -316,39 +339,60 @@ class BatchValidator:
         
         return self.results
     
-    def _ensure_roi_config_for_shot(self, shot_folder: Path, first_take: Path) -> Optional[Dict[str, int]]:
+    def _ensure_roi_config_for_shot(self, shot_folder: Path, first_take: Path) -> Optional[Dict]:
         """
-        Always open calibration GUI for each shot.
-        The ROI is saved for reference but recalibration is required each run.
+        Open calibration GUI for BOTH cameras in each shot.
+        Each camera may have different framing, so we need separate ROIs.
+        
+        Returns dict with 'roi_a' and 'roi_b' keys, or None if cancelled.
         """
-        print(f"\n  Opening calibration tool...")
+        print(f"\n  Opening calibration tool for BOTH cameras...")
         print(f"  → Draw a box around the TIMECODE DISPLAY")
         print(f"  → Press ENTER to confirm, ESC to skip this shot")
         
-        # Find a video to calibrate with
+        # Find video files
         files = self.discovery.get_take_files(first_take)
         if not files:
             print(f"  Error: Could not find video files")
             return None
         
-        video_path = files['video_a']  # Use left camera
-        
-        # Run calibration GUI
         try:
             from calibrate_roi import calibrate_from_video, save_roi_config
             
-            roi_config = calibrate_from_video(video_path)
+            # Calibrate Camera A (left)
+            print(f"\n  --- CAMERA A (left) ---")
+            video_a = files['video_a']
+            roi_a = calibrate_from_video(video_a)
             
-            if roi_config:
-                # Save to shot folder (for reference/logging)
-                config_path = shot_folder / 'roi_config.json'
-                save_roi_config(roi_config, config_path)
-                print(f"\n  ✓ ROI configured")
-                print(f"  ✓ Will be used for all takes in this shot")
-                return roi_config
-            else:
-                print(f"\n  ✗ Calibration cancelled")
+            if roi_a is None:
+                print(f"\n  ✗ Camera A calibration cancelled")
                 return None
+            
+            # Calibrate Camera B (right)
+            print(f"\n  --- CAMERA B (right) ---")
+            video_b = files['video_b']
+            roi_b = calibrate_from_video(video_b)
+            
+            if roi_b is None:
+                print(f"\n  ✗ Camera B calibration cancelled")
+                return None
+            
+            # Create combined config
+            combined_config = {
+                'roi_a': roi_a,
+                'roi_b': roi_b,
+                'version': '2.0',
+                'note': 'Separate ROI for each camera'
+            }
+            
+            # Save to shot folder
+            config_path = shot_folder / 'roi_config.json'
+            with open(config_path, 'w') as f:
+                json.dump(combined_config, f, indent=2)
+            
+            print(f"\n  ✓ Both cameras configured")
+            print(f"  ✓ Config saved to {config_path}")
+            return combined_config
                 
         except ImportError as e:
             print(f"  Error: Could not import calibrate_roi module: {e}")

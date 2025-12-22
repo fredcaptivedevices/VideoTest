@@ -42,3 +42,107 @@
 2025-12-22 00:38:14,934 - VideoAnalyser_B - INFO - Found ROI config: /Users/fredisaac/CaptiveQA/data/pull3/roi_config.json
 2025-12-22 00:38:14,934 - VideoAnalyser_B - INFO - Loaded timecode ROI from config: {'x': 437, 'y': 1327, 'width': 663, 'height': 273}
 2025-12-22 00:38:14,934 - VideoAnalyser_A - INFO - Starting analysis of 400 frames...
+2025-12-22 00:39:32,957 - VideoAnalyser_A - INFO - Analysis complete in 78.0s (5.1 fps average)
+2025-12-22 00:39:32,958 - VideoAnalyser_B - INFO - Starting analysis of 520 frames...
+2025-12-22 00:41:05,912 - VideoAnalyser_B - INFO - Analysis complete in 93.0s (5.6 fps average)
+2025-12-22 00:41:05,933 - DualCameraValidator - INFO - Reports generated in /Users/fredisaac/CaptiveQA/data/pull3/Take_002/qa_reports
+2025-12-22 00:41:05,933 - BatchValidator - INFO - Processing: Take_003
+2025-12-22 00:41:05,933 - DualCameraValidator - INFO - ============================================================
+2025-12-22 00:41:05,933 - DualCameraValidator - INFO - Starting Dual Camera Validation
+2025-12-22 00:41:05,933 - DualCameraValidator - INFO - ============================================================
+2025-12-22 00:41:05,934 - VideoAnalyser_A - INFO - Loaded metadata: pull3_Take_003_left.mov
+2025-12-22 00:41:05,934 - VideoAnalyser_A - INFO -   Reported drops: 0
+2025-12-22 00:41:05,934 - VideoAnalyser_A - INFO -   Start TC: 02:39:56:00
+2025-12-22 00:41:05,936 - FrameReader_A - INFO - Opened video: pull3_Take_003_left.mov
+2025-12-22 00:41:05,936 - FrameReader_A - INFO -   Frames: 7460, FPS: 60.0
+2025-12-22 00:41:05,936 - FrameReader_A - INFO -   Resolution: 1600x2472
+2025-12-22 00:41:05,936 - VideoAnalyser_B - INFO - Loaded metadata: pull3_Take_003_right.mov
+2025-12-22 00:41:05,936 - VideoAnalyser_B - INFO -   Reported drops: 0
+2025-12-22 00:41:05,936 - VideoAnalyser_B - INFO -   Start TC: 02:39:56:00
+2025-12-22 00:41:05,937 - FrameReader_B - INFO - Opened video: pull3_Take_003_right.mov
+2025-12-22 00:41:05,937 - FrameReader_B - INFO -   Frames: 7460, FPS: 60.0
+2025-12-22 00:41:05,937 - FrameReader_B - INFO -   Resolution: 1600x2472
+2025-12-22 00:41:05,937 - VideoAnalyser_A - INFO - Found ROI config: /Users/fredisaac/CaptiveQA/data/pull3/roi_config.json
+2025-12-22 00:41:05,937 - VideoAnalyser_A - INFO - Loaded timecode ROI from config: {'x': 437, 'y': 1327, 'width': 663, 'height': 273}
+2025-12-22 00:41:05,937 - VideoAnalyser_B - INFO - Found ROI config: /Users/fredisaac/CaptiveQA/data/pull3/roi_config.json
+2025-12-22 00:41:05,937 - VideoAnalyser_B - INFO - Loaded timecode ROI from config: {'x': 437, 'y': 1327, 'width': 663, 'height': 273}
+2025-12-22 00:41:05,937 - VideoAnalyser_A - INFO - Starting analysis of 7460 frames...
+2025-12-22 00:48:05,607 - main - INFO - Starting batch validation of: /Users/fredisaac/CaptiveQA/data
+2025-12-22 00:48:15,225 - BatchValidator - INFO - Processing: Take_002
+2025-12-22 00:48:15,226 - DualCameraValidator - INFO - ============================================================
+2025-12-22 00:48:15,226 - DualCameraValidator - INFO - Starting Dual Camera Validation
+2025-12-22 00:48:15,226 - DualCameraValidator - INFO - ============================================================
+2025-12-22 00:48:15,226 - VideoAnalyser_A - INFO - Loaded metadata: pull3_Take_002_left.mov
+2025-12-22 00:48:15,226 - VideoAnalyser_A - INFO -   Reported drops: 0
+2025-12-22 00:48:15,226 - VideoAnalyser_A - INFO -   Start TC: 02:37:21:00
+2025-12-22 00:48:15,227 - VideoAnalyser_A - INFO -   Frame rate: 60 fps
+2025-12-22 00:48:15,227 - VideoAnalyser_A - INFO -   Frame rate multiplier: 2 (video frames per TC frame)
+2025-12-22 00:48:15,229 - FrameReader_A - INFO - Opened video: pull3_Take_002_left.mov
+2025-12-22 00:48:15,229 - FrameReader_A - INFO -   Frames: 400, FPS: 60.0
+2025-12-22 00:48:15,229 - FrameReader_A - INFO -   Resolution: 1600x2472
+2025-12-22 00:48:15,229 - VideoAnalyser_B - INFO - Loaded metadata: pull3_Take_002_right.mov
+2025-12-22 00:48:15,229 - VideoAnalyser_B - INFO -   Reported drops: 0
+2025-12-22 00:48:15,229 - VideoAnalyser_B - INFO -   Start TC: 02:37:21:00
+2025-12-22 00:48:15,229 - VideoAnalyser_B - INFO -   Frame rate: 60 fps
+2025-12-22 00:48:15,229 - VideoAnalyser_B - INFO -   Frame rate multiplier: 2 (video frames per TC frame)
+2025-12-22 00:48:15,230 - FrameReader_B - INFO - Opened video: pull3_Take_002_right.mov
+2025-12-22 00:48:15,230 - FrameReader_B - INFO -   Frames: 520, FPS: 60.0
+2025-12-22 00:48:15,230 - FrameReader_B - INFO -   Resolution: 1600x2472
+2025-12-22 00:48:15,231 - VideoAnalyser_A - INFO - Using manual timecode ROI: {'x': 459, 'y': 1379, 'width': 622, 'height': 207}
+2025-12-22 00:48:15,231 - VideoAnalyser_B - INFO - Using manual timecode ROI: {'x': 410, 'y': 1179, 'width': 684, 'height': 303}
+2025-12-22 00:48:15,231 - VideoAnalyser_A - INFO - Starting analysis of 400 frames...
+2025-12-22 00:49:28,612 - VideoAnalyser_A - INFO - Analysis complete in 73.4s (5.5 fps average)
+2025-12-22 00:49:28,612 - VideoAnalyser_B - INFO - Starting analysis of 520 frames...
+2025-12-22 00:51:05,398 - VideoAnalyser_B - INFO - Analysis complete in 96.8s (5.4 fps average)
+2025-12-22 00:51:05,417 - DualCameraValidator - INFO - Reports generated in /Users/fredisaac/CaptiveQA/data/pull3/Take_002/qa_reports
+2025-12-22 00:51:05,418 - BatchValidator - INFO - Processing: Take_003
+2025-12-22 00:51:05,418 - DualCameraValidator - INFO - ============================================================
+2025-12-22 00:51:05,418 - DualCameraValidator - INFO - Starting Dual Camera Validation
+2025-12-22 00:51:05,418 - DualCameraValidator - INFO - ============================================================
+2025-12-22 00:51:05,418 - VideoAnalyser_A - INFO - Loaded metadata: pull3_Take_003_left.mov
+2025-12-22 00:51:05,418 - VideoAnalyser_A - INFO -   Reported drops: 0
+2025-12-22 00:51:05,418 - VideoAnalyser_A - INFO -   Start TC: 02:39:56:00
+2025-12-22 00:51:05,418 - VideoAnalyser_A - INFO -   Frame rate: 60 fps
+2025-12-22 00:51:05,418 - VideoAnalyser_A - INFO -   Frame rate multiplier: 2 (video frames per TC frame)
+2025-12-22 00:51:05,420 - FrameReader_A - INFO - Opened video: pull3_Take_003_left.mov
+2025-12-22 00:51:05,420 - FrameReader_A - INFO -   Frames: 7460, FPS: 60.0
+2025-12-22 00:51:05,420 - FrameReader_A - INFO -   Resolution: 1600x2472
+2025-12-22 00:51:05,420 - VideoAnalyser_B - INFO - Loaded metadata: pull3_Take_003_right.mov
+2025-12-22 00:51:05,420 - VideoAnalyser_B - INFO -   Reported drops: 0
+2025-12-22 00:51:05,420 - VideoAnalyser_B - INFO -   Start TC: 02:39:56:00
+2025-12-22 00:51:05,420 - VideoAnalyser_B - INFO -   Frame rate: 60 fps
+2025-12-22 00:51:05,420 - VideoAnalyser_B - INFO -   Frame rate multiplier: 2 (video frames per TC frame)
+2025-12-22 00:51:05,422 - FrameReader_B - INFO - Opened video: pull3_Take_003_right.mov
+2025-12-22 00:51:05,422 - FrameReader_B - INFO -   Frames: 7460, FPS: 60.0
+2025-12-22 00:51:05,422 - FrameReader_B - INFO -   Resolution: 1600x2472
+2025-12-22 00:51:05,422 - VideoAnalyser_A - INFO - Using manual timecode ROI: {'x': 459, 'y': 1379, 'width': 622, 'height': 207}
+2025-12-22 00:51:05,422 - VideoAnalyser_B - INFO - Using manual timecode ROI: {'x': 410, 'y': 1179, 'width': 684, 'height': 303}
+2025-12-22 00:51:05,422 - VideoAnalyser_A - INFO - Starting analysis of 7460 frames...
+2025-12-22 01:04:24,796 - main - INFO - Starting batch validation of: /Users/fredisaac/CaptiveQA/data
+2025-12-22 01:04:32,757 - BatchValidator - INFO - Processing: Take_002
+2025-12-22 01:04:32,757 - DualCameraValidator - INFO - ============================================================
+2025-12-22 01:04:32,757 - DualCameraValidator - INFO - Starting Dual Camera Validation
+2025-12-22 01:04:32,757 - DualCameraValidator - INFO - ============================================================
+2025-12-22 01:04:32,758 - VideoAnalyser_A - INFO - Loaded metadata: pull3_Take_002_left.mov
+2025-12-22 01:04:32,758 - VideoAnalyser_A - INFO -   Reported drops: 0
+2025-12-22 01:04:32,758 - VideoAnalyser_A - INFO -   Start TC: 02:37:21:00
+2025-12-22 01:04:32,758 - VideoAnalyser_A - INFO -   Frame rate: 60 fps
+2025-12-22 01:04:32,758 - VideoAnalyser_A - INFO -   Frame rate multiplier: 2 (video frames per TC frame)
+2025-12-22 01:04:32,760 - FrameReader_A - INFO - Opened video: pull3_Take_002_left.mov
+2025-12-22 01:04:32,760 - FrameReader_A - INFO -   Frames: 400, FPS: 60.0
+2025-12-22 01:04:32,760 - FrameReader_A - INFO -   Resolution: 1600x2472
+2025-12-22 01:04:32,761 - VideoAnalyser_B - INFO - Loaded metadata: pull3_Take_002_right.mov
+2025-12-22 01:04:32,761 - VideoAnalyser_B - INFO -   Reported drops: 0
+2025-12-22 01:04:32,761 - VideoAnalyser_B - INFO -   Start TC: 02:37:21:00
+2025-12-22 01:04:32,761 - VideoAnalyser_B - INFO -   Frame rate: 60 fps
+2025-12-22 01:04:32,761 - VideoAnalyser_B - INFO -   Frame rate multiplier: 2 (video frames per TC frame)
+2025-12-22 01:04:32,762 - FrameReader_B - INFO - Opened video: pull3_Take_002_right.mov
+2025-12-22 01:04:32,762 - FrameReader_B - INFO -   Frames: 520, FPS: 60.0
+2025-12-22 01:04:32,762 - FrameReader_B - INFO -   Resolution: 1600x2472
+2025-12-22 01:04:32,762 - VideoAnalyser_A - INFO - Using manual timecode ROI: {'x': 454, 'y': 1385, 'width': 651, 'height': 187}
+2025-12-22 01:04:32,763 - VideoAnalyser_B - INFO - Using manual timecode ROI: {'x': 434, 'y': 1245, 'width': 616, 'height': 209}
+2025-12-22 01:04:32,763 - VideoAnalyser_A - INFO - Starting analysis of 400 frames...
+2025-12-22 01:04:32,793 - easyocr.easyocr - WARNING - Downloading detection model, please wait. This may take several minutes depending upon your network connection.
+2025-12-22 01:04:34,839 - easyocr.easyocr - INFO - Download complete
+2025-12-22 01:04:34,839 - easyocr.easyocr - WARNING - Downloading recognition model, please wait. This may take several minutes depending upon your network connection.
+2025-12-22 01:04:35,486 - easyocr.easyocr - INFO - Download complete.
