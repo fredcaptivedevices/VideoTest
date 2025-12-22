@@ -36,11 +36,22 @@ DEBUG_OUTPUT_DIR = Path("debug_frames")
 _EASYOCR_READER = None
 
 def get_ocr_reader():
-    """Lazy initialisation of EasyOCR reader (only created once)"""
+    """
+    Lazy initialisation of EasyOCR reader (only created once).
+    Automatically uses GPU if CUDA is available.
+    """
     global _EASYOCR_READER
     if _EASYOCR_READER is None:
-        # GPU=False for compatibility; set True if CUDA available for speed
-        _EASYOCR_READER = easyocr.Reader(['en'], gpu=False, verbose=False)
+        # Auto-detect GPU availability
+        import torch
+        use_gpu = torch.cuda.is_available()
+        if use_gpu:
+            gpu_name = torch.cuda.get_device_name(0)
+            print(f"  [OCR] Using GPU: {gpu_name}")
+        else:
+            print("  [OCR] No GPU detected, using CPU (slower)")
+        
+        _EASYOCR_READER = easyocr.Reader(['en'], gpu=use_gpu, verbose=False)
     return _EASYOCR_READER
 
 

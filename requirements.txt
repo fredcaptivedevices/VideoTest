@@ -6,7 +6,13 @@ opencv-python>=4.8.0
 numpy>=1.24.0
 
 # OCR - EasyOCR for better seven-segment LED display recognition
+# GPU acceleration requires PyTorch with CUDA - see SETUP_WINDOWS.md
 easyocr>=1.7.0
 
 # Data analysis
 pandas>=2.0.0
+
+# Note: For GPU acceleration on Windows:
+# 1. Install CUDA Toolkit from NVIDIA
+# 2. Install PyTorch with CUDA: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# 3. Then install other requirements: pip install -r requirements.txt
