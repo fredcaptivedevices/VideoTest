@@ -13,8 +13,6 @@
     
     "ocr_settings": {
         "timecode_pattern": "##:##:##:##",
-        "tesseract_config_digits": "--psm 7 -c tessedit_char_whitelist=0123456789:.",
-        "tesseract_config_text": "--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz ",
         "drop_indicator_keywords": ["drop", "dropped", "frame"],
         "scale_factor": 2
     },
