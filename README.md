@@ -354,7 +354,7 @@ video_qa_automation/
 - `opencv-python>=4.8.0` - Video processing and image analysis
 - `numpy>=1.24.0` - Numerical operations
 - `Pillow>=10.0.0` - Image handling
-- `easyocr>=1.7.0` - OCR engine (better for seven-segment displays than Tesseract)
+- `easyocr>=1.7.0` - OCR engine for seven-segment displays
 - `pandas>=2.0.0` - Data analysis and CSV generation
 
 ## Troubleshooting
