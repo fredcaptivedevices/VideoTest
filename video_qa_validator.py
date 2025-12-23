@@ -5,7 +5,7 @@ Video QA Automation Application for Hardware Validation
 Processes dual-stream video (Camera A/B) and metadata to validate recording integrity.
 
 Author: Captive Devices QA System
-Version: 1.2.0
+Version: 2.0.0 - Dramatically improved OCR pipeline
 """
 
 import cv2
@@ -21,8 +21,22 @@ from typing import Optional, Tuple, List, Dict, Any
 from pathlib import Path
 from datetime import datetime
 from enum import Enum, auto
-import easyocr
 from collections import defaultdict
+
+# Try to import OCR engines
+try:
+    import pytesseract
+    TESSERACT_AVAILABLE = True
+except ImportError:
+    TESSERACT_AVAILABLE = False
+    print("Warning: pytesseract not available, using EasyOCR only")
+
+try:
+    import easyocr
+    EASYOCR_AVAILABLE = True
+except ImportError:
+    EASYOCR_AVAILABLE = False
+    print("Warning: EasyOCR not available, using Tesseract only")
 
 
 # =============================================================================
@@ -32,38 +46,50 @@ from collections import defaultdict
 DEBUG = True  # Set to True to save screenshots of flagged frames
 DEBUG_OUTPUT_DIR = Path("debug_frames")
 
+# Debug: Save OCR input images for troubleshooting
+DEBUG_OCR = True  # Set to True to save OCR debug images
+DEBUG_OCR_DIR = Path("debug_ocr")
+DEBUG_OCR_SAVE_ALL = False  # Set True to save ALL frames, False for first N only
+DEBUG_OCR_FIRST_N = 20  # Save debug images for first N frames
+
 # EasyOCR reader - initialised lazily for performance
 _EASYOCR_READER = None
 
 def get_ocr_reader():
     """
     Lazy initialisation of EasyOCR reader (only created once).
-    Automatically uses GPU if available:
-    - NVIDIA GPUs via CUDA
-    - Apple Silicon (M1/M2/M3) via MPS (Metal Performance Shaders)
+    Automatically uses GPU if available.
     """
     global _EASYOCR_READER
-    if _EASYOCR_READER is None:
-        import torch
-        
-        # Check for GPU availability
-        use_gpu = False
-        gpu_name = "None"
-        
-        # Check NVIDIA CUDA first
-        if torch.cuda.is_available():
-            use_gpu = True
-            gpu_name = torch.cuda.get_device_name(0)
-            print(f"  [OCR] Using NVIDIA GPU: {gpu_name}")
-        # Check Apple Silicon MPS
-        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            use_gpu = True
-            gpu_name = "Apple Silicon (MPS)"
-            print(f"  [OCR] Using Apple Silicon GPU (Metal)")
-        else:
-            print("  [OCR] No GPU detected, using CPU (slower)")
-        
-        _EASYOCR_READER = easyocr.Reader(['en'], gpu=use_gpu, verbose=False)
+    if _EASYOCR_READER is None and EASYOCR_AVAILABLE:
+        try:
+            import torch
+
+            # Check for GPU availability
+            use_gpu = False
+            gpu_name = "None"
+
+            if torch.cuda.is_available():
+                use_gpu = True
+                gpu_name = torch.cuda.get_device_name(0)
+                print(f"  [OCR] Using NVIDIA GPU: {gpu_name}")
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                use_gpu = True
+                gpu_name = "Apple Silicon (MPS)"
+                print(f"  [OCR] Using Apple Silicon GPU (Metal)")
+            else:
+                print("  [OCR] No GPU detected, using CPU")
+
+            _EASYOCR_READER = easyocr.Reader(
+                ['en'],
+                gpu=use_gpu,
+                verbose=False,
+                model_storage_directory=None,
+                download_enabled=True
+            )
+        except Exception as e:
+            print(f"  [OCR] Failed to initialize EasyOCR: {e}")
+            _EASYOCR_READER = None
     return _EASYOCR_READER
 
 
@@ -72,8 +98,8 @@ def get_ocr_reader():
 ROI_DROP = {
     'x': 0,
     'y': 0,
-    'width': 250,
-    'height': 50
+    'width': 300,
+    'height': 60
 }
 
 # Debug: Save OCR input images for troubleshooting
@@ -81,9 +107,10 @@ DEBUG_OCR = False  # Set to True to save OCR debug images (SLOW - disk I/O)
 DEBUG_OCR_DIR = Path("debug_ocr")
 
 # Timecode pattern for OCR validation
+# Timecode patterns for OCR validation
 # Standard: HH:MM:SS:FF with colons
 TIMECODE_PATTERN = re.compile(r'(\d{1,2}):(\d{2}):(\d{2}):(\d{2})')
-# Loose: digits with any separator or no separator (requires 7-8 digits total)
+# Loose: digits with any separator or no separator
 TIMECODE_LOOSE_PATTERN = re.compile(r'(\d{1,2})\D*(\d{2})\D*(\d{2})\D*(\d{2})')
 # Very loose: for when OCR drops characters - try to find any 6-8 digit sequence
 TIMECODE_DIGITS_PATTERN = re.compile(r'(\d{6,8})')
@@ -98,33 +125,20 @@ KNOWN_FRAME_WIDTH = 1600
 KNOWN_FRAME_HEIGHT = 2472
 
 # High frame rate support
-# The LockitSlate timecode display runs at max 30fps (or 60fps with specific settings)
-# When video frame rate exceeds timecode rate, we see the same TC on multiple frames
-# This is computed automatically from metadata frame rate
 DEFAULT_TIMECODE_FPS = 30  # LockitSlate default timecode display rate
 
 
 def compute_frame_rate_multiplier(video_fps: int, timecode_fps: int = DEFAULT_TIMECODE_FPS) -> int:
     """
     Compute how many video frames share each timecode value.
-    
-    Examples:
-        - 30fps video / 30fps TC = multiplier 1 (each frame has unique TC)
-        - 60fps video / 30fps TC = multiplier 2 (pairs of frames share TC)
-        - 120fps video / 30fps TC = multiplier 4 (quads share TC)
-        - 24fps video / 24fps TC = multiplier 1
-        - 48fps video / 24fps TC = multiplier 2
     """
     if video_fps <= 0 or timecode_fps <= 0:
         return 1
-    
-    # For standard frame rates
+
     multiplier = video_fps // timecode_fps
-    
-    # Handle non-integer cases (e.g., 29.97fps)
     if multiplier < 1:
         multiplier = 1
-    
+
     return multiplier
 
 
@@ -146,69 +160,62 @@ class Timecode:
     minutes: int = 0
     seconds: int = 0
     frames: int = 0
-    
+
     @classmethod
     def from_string(cls, tc_string: str) -> Optional['Timecode']:
         """
         Parse timecode from string format HH:MM:SS:FF.
-        
+
         Handles various OCR artifacts:
         - Standard format: "02:31:21:06"
-        - No separators: "02312106" 
+        - No separators: "02312106"
         - Partial separators: "02:312106"
         - Missing leading zeros: "2312106"
-        
+
         Returns None for invalid timecodes (minutes >= 60, seconds >= 60, frames >= 60)
         """
         if not tc_string:
             return None
-            
+
         # Clean the string
         tc_string = tc_string.strip()
-        
+
         def is_valid_timecode(h, m, s, f):
             """Check if timecode values are valid"""
-            # Hours can be 0-23 (or higher for long recordings)
-            # Minutes must be 0-59
-            # Seconds must be 0-59
-            # Frames must be 0-59 (for up to 60fps)
             return 0 <= h <= 99 and 0 <= m <= 59 and 0 <= s <= 59 and 0 <= f <= 59
-        
+
         # Try standard pattern first: HH:MM:SS:FF
         match = TIMECODE_PATTERN.search(tc_string)
         if match:
             h, m, s, f = int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4))
             if is_valid_timecode(h, m, s, f):
                 return cls(hours=h, minutes=m, seconds=s, frames=f)
-        
+
         # Try loose pattern: digits with any/no separators
         match = TIMECODE_LOOSE_PATTERN.search(tc_string)
         if match:
             h, m, s, f = int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4))
             if is_valid_timecode(h, m, s, f):
                 return cls(hours=h, minutes=m, seconds=s, frames=f)
-        
+
         # Try extracting just digits and parsing as HHMMSSFF
         digits_only = re.sub(r'\D', '', tc_string)
-        
+
         if len(digits_only) == 8:
-            # HHMMSSFF
             h, m, s, f = int(digits_only[0:2]), int(digits_only[2:4]), int(digits_only[4:6]), int(digits_only[6:8])
             if is_valid_timecode(h, m, s, f):
                 return cls(hours=h, minutes=m, seconds=s, frames=f)
         elif len(digits_only) == 7:
-            # HMMSSFF (single digit hour)
             h, m, s, f = int(digits_only[0:1]), int(digits_only[1:3]), int(digits_only[3:5]), int(digits_only[5:7])
             if is_valid_timecode(h, m, s, f):
                 return cls(hours=h, minutes=m, seconds=s, frames=f)
         elif len(digits_only) == 6:
-            # MMSSFF (no hour, assume 0)
             m, s, f = int(digits_only[0:2]), int(digits_only[2:4]), int(digits_only[4:6])
             if is_valid_timecode(0, m, s, f):
                 return cls(hours=0, minutes=m, seconds=s, frames=f)
-        
+
         return None
-    
+
     @classmethod
     def from_json(cls, json_tc: dict) -> 'Timecode':
         """Create Timecode from JSON metadata format"""
@@ -218,7 +225,22 @@ class Timecode:
             seconds=int(json_tc.get('Seconds', 0)),
             frames=int(json_tc.get('Frames', 0))
         )
-    
+
+    @classmethod
+    def from_frame_number(cls, total_frames: int, fps: int = 60) -> 'Timecode':
+        """Create Timecode from total frame count"""
+        if total_frames < 0:
+            total_frames = 0
+
+        frames = total_frames % fps
+        total_seconds = total_frames // fps
+        seconds = total_seconds % 60
+        total_minutes = total_seconds // 60
+        minutes = total_minutes % 60
+        hours = total_minutes // 60
+
+        return cls(hours=hours, minutes=minutes, seconds=seconds, frames=frames)
+
     def to_frames(self, fps: int = 60) -> int:
         """Convert timecode to total frame count"""
         return (
@@ -227,16 +249,16 @@ class Timecode:
             self.seconds * fps +
             self.frames
         )
-    
+
     def __str__(self) -> str:
         return f"{self.hours:02d}:{self.minutes:02d}:{self.seconds:02d}:{self.frames:02d}"
-    
+
     def __eq__(self, other: 'Timecode') -> bool:
         if not isinstance(other, Timecode):
             return False
-        return (self.hours == other.hours and 
-                self.minutes == other.minutes and 
-                self.seconds == other.seconds and 
+        return (self.hours == other.hours and
+                self.minutes == other.minutes and
+                self.seconds == other.seconds and
                 self.frames == other.frames)
 
 
@@ -251,6 +273,7 @@ class FrameAnalysis:
     status: FrameStatus = FrameStatus.NORMAL
     image_hash: str = ""
     notes: str = ""
+    ocr_confidence: float = 0.0
 
 
 @dataclass
@@ -267,16 +290,16 @@ class CameraMetadata:
     severity: int
     start_timecode: Timecode
     drop_events: str
-    
+
     @classmethod
     def from_json_file(cls, json_path: Path) -> 'CameraMetadata':
         """Load metadata from JSON file"""
         with open(json_path, 'r') as f:
             data = json.load(f)
-        
+
         captive = data.get('Captive', {})
         timecode = data.get('Timecode', {})
-        
+
         return cls(
             filename=captive.get('Filename', ''),
             full_pathname=captive.get('FullPathname', ''),
@@ -293,6 +316,502 @@ class CameraMetadata:
 
 
 # =============================================================================
+# Enhanced OCR Pipeline for LED Dot-Matrix Displays
+# =============================================================================
+
+class LEDTimecodeOCR:
+    """
+    Specialized OCR pipeline for LED dot-matrix timecode displays.
+
+    Key features:
+    - Multiple preprocessing strategies optimized for LED displays
+    - Dual OCR engine support (EasyOCR + Tesseract)
+    - Confidence-based result selection
+    - Robust timecode pattern matching
+    """
+
+    def __init__(self, camera_id: str = "A"):
+        self.camera_id = camera_id
+        self.logger = logging.getLogger(f"LEDTimecodeOCR_{camera_id}")
+        self._frame_count = 0
+
+        # Track OCR success rate for debugging
+        self.stats = {
+            'attempts': 0,
+            'successes': 0,
+            'tesseract_wins': 0,
+            'easyocr_wins': 0
+        }
+
+        # Cache successful preprocessing methods for faster subsequent frames
+        # Format: [(preprocess_name, scale, engine), ...]
+        self._successful_methods: List[Tuple[str, float, str]] = []
+        self._max_cached_methods = 5
+
+    def preprocess_led_display(self, roi: np.ndarray) -> List[Tuple[str, np.ndarray]]:
+        """
+        Generate multiple preprocessed versions of the LED display ROI.
+
+        LED dot-matrix displays require special handling:
+        1. Dots need to be fused into solid digit shapes
+        2. Background must be cleanly separated from foreground
+        3. Digit segments need to be connected properly
+
+        Returns list of (name, preprocessed_image) tuples for OCR attempts.
+        """
+        if roi is None or roi.size == 0:
+            return []
+
+        # Convert to grayscale if needed
+        if len(roi.shape) == 3:
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = roi.copy()
+
+        results = []
+
+        # Check if this is a light-on-dark or dark-on-light display
+        mean_val = np.mean(gray)
+        is_light_on_dark = mean_val < 128
+
+        # =====================================================================
+        # Strategy 1: Heavy Gaussian blur to fuse LED dots
+        # =====================================================================
+        for blur_size in [9, 11, 15]:
+            blurred = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
+
+            # Multiple threshold levels
+            for thresh_val in [180, 160, 140, 200, 220]:
+                _, thresh = cv2.threshold(blurred, thresh_val, 255, cv2.THRESH_BINARY)
+
+                # Apply morphological closing to connect digit segments
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+                # If light-on-dark, we have white digits - keep as is
+                # If dark-on-light, invert to get white digits
+                if not is_light_on_dark:
+                    closed = cv2.bitwise_not(closed)
+
+                results.append((f'blur{blur_size}_t{thresh_val}', closed))
+
+        # =====================================================================
+        # Strategy 2: Otsu's threshold (auto-level detection)
+        # =====================================================================
+        for blur_size in [7, 11]:
+            blurred = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
+            _, otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            closed = cv2.morphologyEx(otsu, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+            if not is_light_on_dark:
+                closed = cv2.bitwise_not(closed)
+
+            results.append((f'otsu_blur{blur_size}', closed))
+
+        # =====================================================================
+        # Strategy 3: Adaptive threshold (handles uneven lighting)
+        # =====================================================================
+        for blur_size in [7, 11]:
+            blurred = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
+
+            # Adaptive threshold with different block sizes
+            for block_size in [31, 51, 71]:
+                adaptive = cv2.adaptiveThreshold(
+                    blurred, 255,
+                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    cv2.THRESH_BINARY,
+                    block_size, -3
+                )
+
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                closed = cv2.morphologyEx(adaptive, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+                if not is_light_on_dark:
+                    closed = cv2.bitwise_not(closed)
+
+                results.append((f'adaptive_b{blur_size}_bs{block_size}', closed))
+
+        # =====================================================================
+        # Strategy 4: Morphological reconstruction for dot-matrix
+        # =====================================================================
+        blurred = cv2.GaussianBlur(gray, (11, 11), 0)
+
+        for thresh_val in [160, 180, 200]:
+            _, thresh = cv2.threshold(blurred, thresh_val, 255, cv2.THRESH_BINARY)
+
+            # Heavy dilation to connect dots, then erode to restore shape
+            kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            dilated = cv2.dilate(thresh, kernel_dilate, iterations=2)
+
+            kernel_erode = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            eroded = cv2.erode(dilated, kernel_erode, iterations=1)
+
+            if not is_light_on_dark:
+                eroded = cv2.bitwise_not(eroded)
+
+            results.append((f'morph_t{thresh_val}', eroded))
+
+        # =====================================================================
+        # Strategy 5: CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        # =====================================================================
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        blurred = cv2.GaussianBlur(enhanced, (9, 9), 0)
+
+        for thresh_val in [180, 200]:
+            _, thresh = cv2.threshold(blurred, thresh_val, 255, cv2.THRESH_BINARY)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+            if not is_light_on_dark:
+                closed = cv2.bitwise_not(closed)
+
+            results.append((f'clahe_t{thresh_val}', closed))
+
+        return results
+
+    def ocr_with_tesseract(self, img: np.ndarray, scale: float = 2.0) -> Tuple[Optional[Timecode], str, float]:
+        """
+        Run Tesseract OCR on preprocessed image.
+
+        Returns (timecode, raw_text, confidence)
+        """
+        if not TESSERACT_AVAILABLE:
+            return None, "", 0.0
+
+        try:
+            # Scale up for better recognition
+            if scale != 1.0:
+                img_scaled = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            else:
+                img_scaled = img
+
+            # Tesseract config for digits only
+            config = '--psm 7 -c tessedit_char_whitelist=0123456789:'
+
+            # Get text with confidence data
+            data = pytesseract.image_to_data(img_scaled, config=config, output_type=pytesseract.Output.DICT)
+
+            # Combine text and calculate average confidence
+            texts = []
+            confidences = []
+            for i, text in enumerate(data['text']):
+                text = text.strip()
+                conf = data['conf'][i]
+                if text and conf > 0:
+                    texts.append(text)
+                    confidences.append(conf)
+
+            raw_text = ''.join(texts)
+            avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+
+            # Clean up and parse
+            raw_text = self._clean_ocr_text(raw_text)
+            tc = Timecode.from_string(raw_text)
+
+            return tc, raw_text, avg_conf
+
+        except Exception as e:
+            self.logger.debug(f"Tesseract error: {e}")
+            return None, "", 0.0
+
+    def ocr_with_easyocr(self, img: np.ndarray, scale: float = 2.0) -> Tuple[Optional[Timecode], str, float]:
+        """
+        Run EasyOCR on preprocessed image with multiple configurations.
+
+        Returns (timecode, raw_text, confidence)
+        """
+        reader = get_ocr_reader()
+        if reader is None:
+            return None, "", 0.0
+
+        try:
+            # Scale up for better recognition
+            if scale != 1.0:
+                img_scaled = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            else:
+                img_scaled = img
+
+            # Convert to BGR if grayscale (EasyOCR expects this)
+            if len(img_scaled.shape) == 2:
+                img_for_ocr = cv2.cvtColor(img_scaled, cv2.COLOR_GRAY2BGR)
+            else:
+                img_for_ocr = img_scaled
+
+            # Multiple EasyOCR configurations to try (optimized for LED displays)
+            easyocr_configs = [
+                # Config 1: Standard with low thresholds
+                {
+                    'allowlist': '0123456789:',
+                    'paragraph': False,
+                    'detail': 1,
+                    'width_ths': 0.5,
+                    'height_ths': 0.5,
+                    'contrast_ths': 0.1,
+                    'adjust_contrast': 0.5
+                },
+                # Config 2: Lower text threshold for faint digits
+                {
+                    'allowlist': '0123456789:',
+                    'paragraph': False,
+                    'detail': 1,
+                    'text_threshold': 0.5,
+                    'low_text': 0.3,
+                    'link_threshold': 0.3,
+                },
+                # Config 3: Very permissive
+                {
+                    'allowlist': '0123456789:',
+                    'paragraph': False,
+                    'detail': 1,
+                    'width_ths': 0.3,
+                    'height_ths': 0.3,
+                    'text_threshold': 0.4,
+                    'low_text': 0.2,
+                },
+                # Config 4: Paragraph mode (better for connected text)
+                {
+                    'allowlist': '0123456789:',
+                    'paragraph': True,
+                    'detail': 1,
+                    'width_ths': 0.7,
+                },
+                # Config 5: High magnification for small text
+                {
+                    'allowlist': '0123456789:',
+                    'paragraph': False,
+                    'detail': 1,
+                    'mag_ratio': 2.0,
+                    'text_threshold': 0.6,
+                },
+            ]
+
+            best_tc = None
+            best_raw = ""
+            best_conf = 0.0
+
+            for config in easyocr_configs:
+                try:
+                    results = reader.readtext(img_for_ocr, **config)
+
+                    if not results:
+                        continue
+
+                    # Sort by x-position and combine
+                    sorted_results = sorted(results, key=lambda r: r[0][0][0])
+
+                    texts = []
+                    confidences = []
+                    for (bbox, text, conf) in sorted_results:
+                        text = text.strip()
+                        if text:
+                            texts.append(text)
+                            confidences.append(conf)
+
+                    if not texts:
+                        continue
+
+                    raw_text = ''.join(texts)
+                    avg_conf = sum(confidences) / len(confidences) * 100
+
+                    # Clean and try to parse
+                    cleaned = self._clean_ocr_text(raw_text)
+                    tc = Timecode.from_string(cleaned)
+
+                    # If valid timecode and better confidence, keep it
+                    if tc and avg_conf > best_conf:
+                        best_tc = tc
+                        best_raw = cleaned
+                        best_conf = avg_conf
+
+                    # Early exit on high confidence valid result
+                    if best_tc and best_conf > 85:
+                        break
+
+                except Exception:
+                    continue
+
+            return best_tc, best_raw, best_conf
+
+        except Exception as e:
+            self.logger.debug(f"EasyOCR error: {e}")
+            return None, "", 0.0
+
+    def _clean_ocr_text(self, text: str) -> str:
+        """Clean up common OCR errors for timecode recognition"""
+        if not text:
+            return ""
+
+        # Replace common OCR misreads
+        replacements = {
+            '.': ':',   # Period to colon (common separator confusion)
+            ',': ':',   # Comma to colon
+            ';': ':',   # Semicolon to colon
+            ' ': '',    # Remove spaces
+            'O': '0',   # O to zero
+            'o': '0',   # lowercase o to zero
+            'Q': '0',   # Q to zero
+            'D': '0',   # D to zero (closed loop)
+            'l': '1',   # lowercase L to one
+            'I': '1',   # uppercase I to one
+            '|': '1',   # pipe to one
+            'i': '1',   # lowercase i to one
+            '!': '1',   # exclamation to one
+            'S': '5',   # S to five
+            's': '5',   # lowercase s to five
+            'B': '8',   # B to eight
+            'Z': '2',   # Z to two
+            'z': '2',   # lowercase z to two
+            'G': '6',   # G to six
+            'g': '9',   # g to nine (loop at bottom)
+            'q': '9',   # q to nine
+            'A': '4',   # A to four
+            'b': '6',   # b to six
+            'T': '7',   # T to seven
+            '\n': '',   # Remove newlines
+            '\r': '',   # Remove carriage returns
+            '-': ':',   # Hyphen to colon (sometimes used as separator)
+        }
+
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+
+        return text
+
+    def extract_timecode(self, roi: np.ndarray) -> Tuple[Optional[Timecode], str, float]:
+        """
+        Extract timecode from ROI using multiple preprocessing strategies and OCR engines.
+
+        Uses method caching to prioritize previously successful strategies.
+
+        Returns (timecode, raw_text, confidence)
+        """
+        self.stats['attempts'] += 1
+        self._frame_count += 1
+
+        if roi is None or roi.size == 0 or roi.shape[0] < 10 or roi.shape[1] < 50:
+            return None, "", 0.0
+
+        # Generate preprocessed images
+        preprocessed_images = self.preprocess_led_display(roi)
+        preprocessed_dict = {name: img for name, img in preprocessed_images}
+
+        # Debug: Save preprocessing results for first N frames
+        if DEBUG_OCR and (DEBUG_OCR_SAVE_ALL or self._frame_count <= DEBUG_OCR_FIRST_N):
+            self._save_debug_images(roi, preprocessed_images)
+
+        # Track best result
+        best_tc = None
+        best_raw = ""
+        best_conf = 0.0
+        best_method = ""
+
+        # PHASE 1: Try cached successful methods first (much faster)
+        for cached_name, cached_scale, cached_engine in self._successful_methods:
+            if cached_name in preprocessed_dict:
+                img = preprocessed_dict[cached_name]
+
+                if cached_engine == 'tesseract' and TESSERACT_AVAILABLE:
+                    tc, raw, conf = self.ocr_with_tesseract(img, cached_scale)
+                elif cached_engine == 'easyocr' and EASYOCR_AVAILABLE:
+                    tc, raw, conf = self.ocr_with_easyocr(img, cached_scale)
+                else:
+                    continue
+
+                if tc and conf > best_conf:
+                    best_tc = tc
+                    best_raw = raw
+                    best_conf = conf
+                    best_method = f"{cached_engine}_{cached_name}_s{cached_scale}"
+
+                # If cached method works well, use it
+                if best_tc and best_conf > 70:
+                    break
+
+        # PHASE 2: Full search if cached methods didn't work well
+        if not best_tc or best_conf < 70:
+            for name, img in preprocessed_images:
+                # Skip methods we already tried from cache
+                already_tried = any(
+                    name == cn for cn, _, _ in self._successful_methods
+                )
+
+                for scale in [2.0, 3.0, 2.5]:
+                    # Try Tesseract
+                    if TESSERACT_AVAILABLE:
+                        tc, raw, conf = self.ocr_with_tesseract(img, scale)
+                        if tc and conf > best_conf:
+                            best_tc = tc
+                            best_raw = raw
+                            best_conf = conf
+                            best_method = f"tesseract_{name}_s{scale}"
+
+                    # Try EasyOCR
+                    if EASYOCR_AVAILABLE:
+                        tc, raw, conf = self.ocr_with_easyocr(img, scale)
+                        if tc and conf > best_conf:
+                            best_tc = tc
+                            best_raw = raw
+                            best_conf = conf
+                            best_method = f"easyocr_{name}_s{scale}"
+
+                # Early exit if we get a high-confidence result
+                if best_conf > 80:
+                    break
+
+        # Update cache with successful method
+        if best_tc and best_method:
+            # Parse method string to extract components
+            parts = best_method.split('_')
+            if len(parts) >= 3:
+                engine = parts[0]
+                # Reconstruct preprocess name (everything between engine and scale)
+                scale_part = parts[-1]  # e.g., "s2.0"
+                scale = float(scale_part[1:]) if scale_part.startswith('s') else 2.0
+                preprocess_name = '_'.join(parts[1:-1])
+
+                # Add to cache if not already there
+                cache_entry = (preprocess_name, scale, engine)
+                if cache_entry not in self._successful_methods:
+                    self._successful_methods.insert(0, cache_entry)
+                    # Keep cache limited
+                    if len(self._successful_methods) > self._max_cached_methods:
+                        self._successful_methods.pop()
+
+        # Update stats
+        if best_tc:
+            self.stats['successes'] += 1
+            if 'tesseract' in best_method:
+                self.stats['tesseract_wins'] += 1
+            else:
+                self.stats['easyocr_wins'] += 1
+
+        return best_tc, best_raw, best_conf
+
+    def _save_debug_images(self, roi: np.ndarray, preprocessed: List[Tuple[str, np.ndarray]]):
+        """Save debug images for troubleshooting"""
+        try:
+            DEBUG_OCR_DIR.mkdir(exist_ok=True)
+
+            # Save original ROI
+            cv2.imwrite(
+                str(DEBUG_OCR_DIR / f"cam{self.camera_id}_frame{self._frame_count:04d}_00_roi.png"),
+                roi
+            )
+
+            # Save first few preprocessed images
+            for i, (name, img) in enumerate(preprocessed[:8]):
+                cv2.imwrite(
+                    str(DEBUG_OCR_DIR / f"cam{self.camera_id}_frame{self._frame_count:04d}_{i+1:02d}_{name}.png"),
+                    img
+                )
+        except Exception as e:
+            self.logger.debug(f"Failed to save debug images: {e}")
+
+
+# =============================================================================
 # Frame Reader Class
 # =============================================================================
 
@@ -300,14 +819,8 @@ class FrameReader:
     """
     Handles frame extraction and analysis from video files.
     Includes drop zone detection and timecode OCR.
-    
-    PERFORMANCE OPTIMISATIONS:
-    - Sequential frame reading (no seeking)
-    - Downscaled frames for hashing
-    - Cached ROI extraction
-    - Simplified duplicate detection using structural similarity
     """
-    
+
     def __init__(self, video_path: Path, camera_id: str = "A", frame_rate_multiplier: int = 1):
         self.video_path = Path(video_path)
         self.camera_id = camera_id
@@ -316,203 +829,203 @@ class FrameReader:
         self.fps: float = 0
         self.frame_width: int = 0
         self.frame_height: int = 0
-        
+
         # Frame rate multiplier - how many video frames per timecode frame
-        # Set dynamically based on video FPS vs timecode FPS
         self.frame_rate_multiplier = frame_rate_multiplier
-        
-        # ROI for timecode - auto-detected on first frame
+
+        # ROI for timecode - can be auto-detected or manually set
         self.roi_timecode: Optional[Dict[str, int]] = None
         self.timecode_calibrated: bool = False
-        
+
+        # Enhanced OCR pipeline
+        self.ocr_pipeline = LEDTimecodeOCR(camera_id)
+
         # Timecode-based duplicate detection
-        # At 60fps with 30fps timecode, each TC value appears for 2 consecutive frames
-        # We track the timecode value and count how many frames show it
         self._prev_timecode: Optional['Timecode'] = None
-        self._consecutive_same_tc: int = 0  # How many frames with same TC value
-        
-        # Legacy image-based detection (fallback if OCR fails)
+        self._consecutive_same_tc: int = 0
+
+        # Legacy image-based detection (fallback)
         self._prev_frame_small: Optional[np.ndarray] = None
         self._hash_size: int = 16
         self._consecutive_duplicates: int = 0
-        
-        # Logger
+
         self.logger = logging.getLogger(f"FrameReader_{camera_id}")
-    
+
     def open(self) -> bool:
         """Open video file and initialise properties"""
         if not self.video_path.exists():
             self.logger.error(f"Video file not found: {self.video_path}")
             return False
-        
+
         self.cap = cv2.VideoCapture(str(self.video_path))
         if not self.cap.isOpened():
             self.logger.error(f"Failed to open video: {self.video_path}")
             return False
-        
+
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.fps = self.cap.get(cv2.CAP_PROP_FPS)
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
+
         # Performance: set buffer size for sequential reading
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
-        
+
         self.logger.info(f"Opened video: {self.video_path.name}")
         self.logger.info(f"  Frames: {self.total_frames}, FPS: {self.fps}")
         self.logger.info(f"  Resolution: {self.frame_width}x{self.frame_height}")
-        
+
         return True
-    
+
     def close(self):
         """Release video capture"""
         if self.cap:
             self.cap.release()
             self.cap = None
-    
+
     def read_next_frame(self) -> Optional[np.ndarray]:
-        """Read the next frame sequentially (faster than seeking)"""
+        """Read the next frame sequentially"""
         if not self.cap:
             return None
-        
+
         ret, frame = self.cap.read()
-        if not ret:
-            return None
-        
-        return frame
-    
+        return frame if ret else None
+
     def read_frame(self, frame_number: int) -> Optional[np.ndarray]:
-        """Read a specific frame from the video (use read_next_frame for sequential access)"""
+        """Read a specific frame from the video"""
         if not self.cap:
             return None
-        
+
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
         ret, frame = self.cap.read()
-        
+
         if not ret:
             self.logger.warning(f"Failed to read frame {frame_number}")
             return None
-        
+
         return frame
-    
+
     def detect_drop_indicator(self, frame: np.ndarray) -> bool:
         """
         Detect if the 'Dropped frame' indicator is present.
         Uses fixed ROI based on known overlay position (top-left).
-        
-        OPTIMISED: Simple pixel intensity check before OCR
         """
         # Extract drop indicator region
         roi = frame[
             ROI_DROP['y']:ROI_DROP['y'] + ROI_DROP['height'],
             ROI_DROP['x']:ROI_DROP['x'] + ROI_DROP['width']
         ]
-        
+
         # Convert to grayscale
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        
-        # OPTIMISATION: Quick check - if region is too dark, skip OCR
+
+        # Quick check - if region is too dark, skip OCR
         mean_brightness = np.mean(gray)
-        if mean_brightness < 30:  # Very dark region, no text
+        if mean_brightness < 30:
             return False
-        
+
         # Check for white pixels (text) in the region
         _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
         white_pixel_ratio = np.sum(thresh > 0) / thresh.size
-        
+
         # If less than 1% white pixels, probably no text
         if white_pixel_ratio < 0.01:
             return False
-        
+
         # Use OCR to detect "Dropped" or "DROP" text
-        ocr_config = '--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz '
-        text = pytesseract.image_to_string(thresh, config=ocr_config).strip().lower()
-        
-        # Check for drop-related keywords
-        drop_keywords = ['drop', 'dropped', 'frame']
-        return any(keyword in text for keyword in drop_keywords)
-    
+        detected = False
+
+        # Try Tesseract first (faster for this use case)
+        if TESSERACT_AVAILABLE:
+            try:
+                ocr_config = '--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz '
+                text = pytesseract.image_to_string(thresh, config=ocr_config).strip().lower()
+                drop_keywords = ['drop', 'dropped', 'frame']
+                detected = any(keyword in text for keyword in drop_keywords)
+            except Exception:
+                pass
+
+        # Fallback to EasyOCR if needed
+        if not detected and EASYOCR_AVAILABLE:
+            try:
+                reader = get_ocr_reader()
+                if reader:
+                    results = reader.readtext(thresh, detail=0)
+                    text = ' '.join(results).lower()
+                    drop_keywords = ['drop', 'dropped', 'frame']
+                    detected = any(keyword in text for keyword in drop_keywords)
+            except Exception:
+                pass
+
+        return detected
+
     def auto_detect_timecode_roi(self, frame: np.ndarray) -> bool:
         """
         Auto-detect the timecode region on the first frame.
-        Scans for digital display pattern (##:##:##:##).
-        
-        The slate can be ANYWHERE in the frame - searches entire image.
-        Optimised for known 1600x2472 portrait resolution.
+        Enhanced detection for LED dot-matrix displays.
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         height, width = gray.shape
-        
+
         self.logger.info(f"Auto-detecting timecode ROI in {width}x{height} frame...")
-        
-        # Strategy 1: Look for the bright LED timecode display
-        # The timecode is bright white/green digits on dark background
-        # LED displays typically have very high brightness (200+)
-        
-        for thresh_val in [230, 210, 190, 170, 150]:
+
+        # Strategy 1: Look for bright LED regions
+        for thresh_val in [220, 200, 180, 160]:
             _, bright_mask = cv2.threshold(gray, thresh_val, 255, cv2.THRESH_BINARY)
-            
-            # Dilate to connect the LED segments into digit shapes
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 8))
+
+            # Dilate to connect LED segments
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 10))
             dilated = cv2.dilate(bright_mask, kernel, iterations=3)
-            
-            # Find contours
+
             contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            # Sort by area (largest bright regions first)
             contours = sorted(contours, key=cv2.contourArea, reverse=True)
-            
-            for contour in contours[:15]:  # Check top 15 candidates
+
+            for contour in contours[:20]:
                 x, y, w, h = cv2.boundingRect(contour)
                 aspect_ratio = w / h if h > 0 else 0
                 area = w * h
-                
-                # Timecode displays: wide rectangle
-                # Format "00:00:00:00" has aspect ratio roughly 4:1 to 7:1
-                # On 1600px wide frame, display is typically 300-500px wide
-                if 2.5 < aspect_ratio < 9.0 and w > 60 and h > 12 and area > 1500:
+
+                # Timecode display: wide rectangle (aspect ratio 3:1 to 8:1)
+                if 2.5 < aspect_ratio < 10.0 and w > 80 and h > 15 and area > 2000:
                     # Add generous padding
-                    padding = 50
-                    roi_x = max(0, x - padding)
-                    roi_y = max(0, y - padding)
-                    roi_w = min(width - roi_x, w + 2 * padding)
-                    roi_h = min(height - roi_y, h + 2 * padding)
-                    
-                    # Try OCR on this region
+                    padding_x = 60
+                    padding_y = 40
+                    roi_x = max(0, x - padding_x)
+                    roi_y = max(0, y - padding_y)
+                    roi_w = min(width - roi_x, w + 2 * padding_x)
+                    roi_h = min(height - roi_y, h + 2 * padding_y)
+
+                    # Test OCR on this region
                     test_roi = gray[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w]
-                    tc = self._try_ocr_timecode(test_roi)
-                    
+                    tc, _, conf = self.ocr_pipeline.extract_timecode(test_roi)
+
                     if tc:
                         self.roi_timecode = {'x': roi_x, 'y': roi_y, 'width': roi_w, 'height': roi_h}
                         self.timecode_calibrated = True
                         self.logger.info(f"Timecode ROI detected (thresh={thresh_val}): x={roi_x}, y={roi_y}, w={roi_w}, h={roi_h}")
-                        self.logger.info(f"  Initial timecode reading: {tc}")
+                        self.logger.info(f"  Initial timecode: {tc} (confidence: {conf:.1f})")
                         return True
-        
-        # Strategy 2: Grid-based scan of entire frame
-        # For 1600x2472, use appropriately sized windows
+
+        # Strategy 2: Grid-based scan
         self.logger.info("Bright region detection failed, trying grid scan...")
-        
-        # Window sizes optimised for 1600x2472 resolution
-        # Timecode display is roughly 350-450px wide, 50-80px tall
-        window_sizes = [(450, 100), (400, 90), (350, 80), (500, 110)]
-        
+
+        window_sizes = [(500, 120), (450, 100), (400, 90), (350, 80)]
+
         for win_w, win_h in window_sizes:
-            step_x = win_w // 3  # 66% overlap for thorough coverage
-            step_y = win_h // 2
-            
+            step_x = win_w // 4
+            step_y = win_h // 3
+
             for y in range(0, height - win_h, step_y):
                 for x in range(0, width - win_w, step_x):
                     test_roi = gray[y:y+win_h, x:x+win_w]
-                    
-                    # Quick check: skip very dark regions
-                    if np.max(test_roi) < 120:
+
+                    # Skip very dark regions
+                    if np.max(test_roi) < 100:
                         continue
-                    
-                    tc = self._try_ocr_timecode(test_roi)
-                    
+
+                    tc, _, conf = self.ocr_pipeline.extract_timecode(test_roi)
+
                     if tc:
-                        padding = 40
+                        padding = 50
                         self.roi_timecode = {
                             'x': max(0, x - padding),
                             'y': max(0, y - padding),
@@ -521,89 +1034,22 @@ class FrameReader:
                         }
                         self.timecode_calibrated = True
                         self.logger.info(f"Timecode ROI detected (grid scan): {self.roi_timecode}")
-                        self.logger.info(f"  Initial timecode reading: {tc}")
+                        self.logger.info(f"  Initial timecode: {tc}")
                         return True
-        
-        # Fallback: Use generous centre-lower region (where slate typically is in portrait)
+
+        # Fallback: Use large center-lower region
         self.logger.warning("Auto-detection failed, using default centre ROI")
-        # For 1600x2472, slate is often in lower-centre area
         self.roi_timecode = {
             'x': 100,
-            'y': height // 3,
+            'y': height // 4,
             'width': width - 200,
             'height': height // 2
         }
         return False
-    
-    def _try_ocr_timecode(self, roi: np.ndarray) -> Optional[Timecode]:
-        """Attempt OCR on a region and return Timecode if valid pattern found"""
-        if roi.size == 0 or roi.shape[0] < 10 or roi.shape[1] < 50:
-            return None
-        
-        # Quick brightness check - timecode region should have bright pixels
-        if np.max(roi) < 100:
-            return None
-            
-        # Try multiple threshold methods
-        methods = [
-            lambda img: cv2.threshold(img, 200, 255, cv2.THRESH_BINARY)[1],
-            lambda img: cv2.threshold(img, 180, 255, cv2.THRESH_BINARY)[1],
-            lambda img: cv2.threshold(img, 150, 255, cv2.THRESH_BINARY)[1],
-            lambda img: cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
-            lambda img: cv2.threshold(img, 220, 255, cv2.THRESH_BINARY)[1],
-        ]
-        
-        for method in methods:
-            try:
-                thresh = method(roi)
-                
-                # Scale up for better OCR
-                scale = 2.0 if roi.shape[1] < 300 else 1.5
-                scaled = cv2.resize(thresh, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
-                
-                ocr_config = '--psm 7 -c tessedit_char_whitelist=0123456789:.'
-                text = pytesseract.image_to_string(scaled, config=ocr_config).strip()
-                text = text.replace('.', ':').replace(' ', '').replace('O', '0').replace('o', '0')
-                
-                tc = Timecode.from_string(text)
-                if tc:
-                    return tc
-            except Exception:
-                continue
-        
-        return None
-    
-    def _generate_scan_regions(self, shape: Tuple[int, ...]) -> List[Tuple[int, int, int, int]]:
-        """Generate regions to scan for timecode display"""
-        height, width = shape[:2]
-        regions = []
-        
-        # Common positions for digital slates - prioritise right side and centre
-        # Right third (most common for clapperboards)
-        regions.append((width // 2, height // 4, width // 2, height // 2))
-        
-        # Centre area
-        regions.append((width // 4, height // 4, width // 2, height // 2))
-        
-        # Upper right
-        regions.append((width // 2, 0, width // 2, height // 2))
-        
-        # Full right side
-        regions.append((width * 2 // 3, 0, width // 3, height))
-        
-        # Sliding window for thorough coverage
-        window_w, window_h = 350, 80
-        step = 150
-        
-        for y in range(0, height - window_h, step):
-            for x in range(width // 3, width - window_w, step):  # Focus on right 2/3
-                regions.append((x, y, window_w, window_h))
-        
-        return regions
-    
+
     def extract_timecode(self, frame: np.ndarray) -> Tuple[Optional[Timecode], str]:
         """
-        Extract timecode from frame using EasyOCR.
+        Extract timecode from frame using enhanced OCR pipeline.
         Returns tuple of (Timecode object, raw OCR text).
 
         OPTIMISED for speed and accuracy:
@@ -834,145 +1280,117 @@ class FrameReader:
             self.logger.debug(f"EasyOCR error: {e}")
             return None, ""
     
+        # Use enhanced OCR pipeline
+        tc, raw, _ = self.ocr_pipeline.extract_timecode(roi)
+        return tc, raw
+
     def compute_frame_hash(self, frame: np.ndarray) -> str:
-        """
-        Compute perceptual hash for frame comparison.
-        
-        OPTIMISED: Use OpenCV resize + simple hash instead of imagehash library
-        """
-        # Convert to grayscale and resize to small square
+        """Compute perceptual hash for frame comparison."""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         small = cv2.resize(gray, (self._hash_size, self._hash_size), interpolation=cv2.INTER_AREA)
-        
-        # Compute average hash
+
         avg = np.mean(small)
         hash_bits = (small > avg).flatten()
-        
-        # Convert to hex string
+
         hash_int = 0
         for bit in hash_bits:
             hash_int = (hash_int << 1) | int(bit)
-        
+
         return format(hash_int, f'0{self._hash_size * self._hash_size // 4}x')
-    
+
     def check_timecode_duplicate(self, current_tc: Optional['Timecode']) -> bool:
         """
         Check if this frame is a duplicate based on TIMECODE VALUE.
-        
-        This is the primary duplicate detection method. At 60fps with 30fps timecode
-        (from an Ambient LockitSlate), each timecode value appears for exactly 2 frames.
-        
-        frame_rate_multiplier controls expected duplicates:
-        - Multiplier=2 (60fps/30tc): Each TC appears on 2 frames, so seeing it twice is normal
-        - Multiplier=1 (30fps/30tc): Each TC should appear once, any repeat is a drop
-        
+
+        At 60fps with 30fps timecode, each timecode value appears for exactly 2 frames.
         Returns True if we've seen this timecode MORE times than expected (indicating a drop).
         """
         if current_tc is None:
-            # OCR failed - can't determine duplicate status from timecode
             return False
-        
+
         if self._prev_timecode is None:
-            # First frame with valid timecode
             self._prev_timecode = current_tc
             self._consecutive_same_tc = 1
             return False
-        
-        # Compare timecode values
+
         if current_tc.to_frames() == self._prev_timecode.to_frames():
-            # Same timecode as previous frame
             self._consecutive_same_tc += 1
         else:
-            # Timecode changed - reset counter
             self._prev_timecode = current_tc
             self._consecutive_same_tc = 1
-        
-        # At 60fps/30tc (multiplier=2):
-        #   - Seeing TC twice (consecutive_same_tc=2) is NORMAL
-        #   - Seeing TC 3+ times (consecutive_same_tc>=3) is a DROP
-        # The condition is: consecutive_same_tc > frame_rate_multiplier
+
         return self._consecutive_same_tc > self.frame_rate_multiplier
-    
+
     def frames_are_duplicate(self, frame1: np.ndarray, frame2: np.ndarray) -> bool:
-        """
-        LEGACY: Check if two frames are visual duplicates.
-        
-        This method is kept for compatibility but the preferred approach is
-        check_timecode_duplicate() which compares actual timecode values.
-        """
+        """Check if two frames are visual duplicates."""
         if not self.roi_timecode:
             size = (64, 64)
             small1 = cv2.resize(cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY), size, interpolation=cv2.INTER_AREA)
             small2 = cv2.resize(cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY), size, interpolation=cv2.INTER_AREA)
             mse = np.mean((small1.astype(float) - small2.astype(float)) ** 2)
             return mse < DUPLICATE_MSE_THRESHOLD
-        
+
         roi = self.roi_timecode
         tc1 = frame1[roi['y']:roi['y']+roi['height'], roi['x']:roi['x']+roi['width']]
         tc2 = frame2[roi['y']:roi['y']+roi['height'], roi['x']:roi['x']+roi['width']]
-        
+
         gray1 = cv2.cvtColor(tc1, cv2.COLOR_BGR2GRAY)
         gray2 = cv2.cvtColor(tc2, cv2.COLOR_BGR2GRAY)
-        
+
         size = (128, 32)
         small1 = cv2.resize(gray1, size, interpolation=cv2.INTER_AREA)
         small2 = cv2.resize(gray2, size, interpolation=cv2.INTER_AREA)
-        
+
         mse = np.mean((small1.astype(float) - small2.astype(float)) ** 2)
         return mse < DUPLICATE_MSE_THRESHOLD
-    
+
     def frames_are_duplicate_fast(self, current_frame: np.ndarray) -> bool:
-        """
-        LEGACY: Fast duplicate check using image comparison.
-        
-        This is a fallback method. The preferred approach is check_timecode_duplicate()
-        which is called from the analysis loop after OCR extraction.
-        """
+        """Fast duplicate check using image comparison (legacy fallback)."""
         if not self.roi_timecode:
             size = (64, 64)
             small_current = cv2.resize(
-                cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY), 
-                size, 
+                cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY),
+                size,
                 interpolation=cv2.INTER_AREA
             )
-            
+
             if self._prev_frame_small is None:
                 self._prev_frame_small = small_current
                 self._consecutive_duplicates = 0
                 return False
-            
+
             mse = np.mean((small_current.astype(float) - self._prev_frame_small.astype(float)) ** 2)
             is_same = mse < DUPLICATE_MSE_THRESHOLD
-            
+
             if is_same:
                 self._consecutive_duplicates += 1
             else:
                 self._consecutive_duplicates = 0
                 self._prev_frame_small = small_current
-            
+
             return self._consecutive_duplicates >= self.frame_rate_multiplier
-        
+
         roi = self.roi_timecode
         tc_region = current_frame[roi['y']:roi['y']+roi['height'], roi['x']:roi['x']+roi['width']]
         gray = cv2.cvtColor(tc_region, cv2.COLOR_BGR2GRAY)
-        
+
         size = (128, 32)
         small_current = cv2.resize(gray, size, interpolation=cv2.INTER_AREA)
-        
+
         if self._prev_frame_small is None:
             self._prev_frame_small = small_current
             self._consecutive_duplicates = 0
             return False
-        
+
         mse = np.mean((small_current.astype(float) - self._prev_frame_small.astype(float)) ** 2)
         is_same = mse < DUPLICATE_MSE_THRESHOLD
-        
+
         if is_same:
             self._consecutive_duplicates += 1
         else:
             self._consecutive_duplicates = 0
             self._prev_frame_small = small_current
-        
+
         return self._consecutive_duplicates >= self.frame_rate_multiplier
 
 
@@ -985,38 +1403,35 @@ class VideoAnalyser:
     Main analysis engine implementing the Truth Table logic.
     Processes frames and validates against metadata.
     """
-    
+
     def __init__(self, video_path: Path, metadata_path: Path, camera_id: str = "A"):
         self.video_path = Path(video_path)
         self.metadata_path = Path(metadata_path)
         self.camera_id = camera_id
-        
+
         self.reader: Optional[FrameReader] = None
         self.metadata: Optional[CameraMetadata] = None
         self.results: List[FrameAnalysis] = []
-        
-        # Statistics
+
         self.stats = {
             'total_frames': 0,
-            'successful_drops': 0,      # Physical drop + indicator
-            'false_negatives': 0,       # Physical drop, no indicator
-            'false_positives': 0,       # No physical drop, indicator present
+            'successful_drops': 0,
+            'false_negatives': 0,
+            'false_positives': 0,
             'corruptions': 0,
             'undetected_skips': 0,
             'ocr_failures': 0,
             'physical_drops': 0,
             'indicated_drops': 0
         }
-        
+
         self.logger = logging.getLogger(f"VideoAnalyser_{camera_id}")
-        
-        # Debug output
+
         if DEBUG:
             DEBUG_OUTPUT_DIR.mkdir(exist_ok=True)
-    
+
     def load(self) -> bool:
         """Load video and metadata"""
-        # Load metadata
         try:
             self.metadata = CameraMetadata.from_json_file(self.metadata_path)
             self.logger.info(f"Loaded metadata: {self.metadata.filename}")
@@ -1026,102 +1441,104 @@ class VideoAnalyser:
         except Exception as e:
             self.logger.error(f"Failed to load metadata: {e}")
             return False
-        
-        # Compute frame rate multiplier from metadata
-        # This determines how many video frames share each timecode value
+
         multiplier = compute_frame_rate_multiplier(self.metadata.frame_rate)
-        self.logger.info(f"  Frame rate multiplier: {multiplier} (video frames per TC frame)")
-        
-        # Open video with the computed multiplier
+        self.logger.info(f"  Frame rate multiplier: {multiplier}")
+
         self.reader = FrameReader(self.video_path, self.camera_id, frame_rate_multiplier=multiplier)
         if not self.reader.open():
             return False
-        
+
         return True
-    
+
     def calibrate(self, manual_roi: Optional[Dict[str, int]] = None, save_debug: bool = False) -> bool:
-        """
-        Calibrate timecode detection on first frame.
-        
-        Priority order:
-        1. Manual ROI passed as argument
-        2. ROI config file (roi_config.json) in video folder or parent
-        3. Auto-detection (fallback)
-        
-        Args:
-            manual_roi: Optional manual override for timecode ROI
-                        Format: {'x': int, 'y': int, 'width': int, 'height': int}
-            save_debug: If True, saves a debug image showing detected ROI
-        """
+        """Calibrate timecode detection on first frame."""
         if not self.reader:
             return False
-        
-        # Priority 1: Manual ROI argument
+
         if manual_roi:
             self.reader.roi_timecode = manual_roi
             self.reader.timecode_calibrated = True
             self.logger.info(f"Using manual timecode ROI: {manual_roi}")
             return True
-        
-        # Priority 2: Load from config file
+
         config_roi = self._load_roi_from_config()
         if config_roi:
             self.reader.roi_timecode = config_roi
             self.reader.timecode_calibrated = True
             self.logger.info(f"Loaded timecode ROI from config: {config_roi}")
             return True
-        
-        # Priority 3: Auto-detection
+
         frame = self.reader.read_frame(0)
         if frame is None:
             self.logger.error("Cannot read first frame for calibration")
             return False
-        
-        # Reset to frame 0 after calibration read
+
         self.reader.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        
+
         success = self.reader.auto_detect_timecode_roi(frame)
         if not success:
             self.logger.warning("Timecode ROI auto-detection failed, using fallback")
             self.logger.warning("Consider running: python calibrate_roi.py /path/to/video.mov")
-        
-        # Save debug image showing ROI
+
         if save_debug and self.reader.roi_timecode:
             self._save_calibration_debug(frame)
-        
+
         return True
-    
+
     def _load_roi_from_config(self) -> Optional[Dict[str, int]]:
-        """Load ROI from roi_config.json if it exists"""
-        # Check video folder
+        """
+        Load ROI from roi_config.json in the take folder.
+
+        NOTE: ROI config is now per-take only (not inherited from shot folder)
+        because the slate may move between takes.
+        """
         video_folder = self.video_path.parent
-        
-        # Search locations: video folder, parent (take), grandparent (shot)
-        search_paths = [
-            video_folder / 'roi_config.json',
-            video_folder.parent / 'roi_config.json',
-            video_folder.parent.parent / 'roi_config.json',
-        ]
-        
-        for config_path in search_paths:
-            if config_path.exists():
-                try:
-                    with open(config_path, 'r') as f:
-                        config = json.load(f)
-                    roi = config.get('timecode_roi')
+
+        # Only look in the take folder - not parent folders
+        # Each take requires its own ROI calibration
+        config_path = video_folder / 'roi_config.json'
+
+        if config_path.exists():
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+
+                # New format with per-camera ROIs
+                camera_key = f'roi_{self.camera_id.lower()}'
+                if camera_key in config:
+                    roi = config[camera_key]
                     if roi and all(k in roi for k in ['x', 'y', 'width', 'height']):
-                        self.logger.info(f"Found ROI config: {config_path}")
+                        self.logger.info(f"Found per-camera ROI config: {config_path} [{camera_key}]")
                         return roi
-                except Exception as e:
-                    self.logger.warning(f"Error loading ROI config {config_path}: {e}")
-        
+
+                # Fallback to roi_a/roi_b format
+                if 'roi_a' in config and self.camera_id.upper() == 'A':
+                    roi = config['roi_a']
+                    if roi and all(k in roi for k in ['x', 'y', 'width', 'height']):
+                        self.logger.info(f"Found ROI config: {config_path} [roi_a]")
+                        return roi
+                elif 'roi_b' in config and self.camera_id.upper() == 'B':
+                    roi = config['roi_b']
+                    if roi and all(k in roi for k in ['x', 'y', 'width', 'height']):
+                        self.logger.info(f"Found ROI config: {config_path} [roi_b]")
+                        return roi
+
+                # Legacy format with single timecode_roi
+                roi = config.get('timecode_roi')
+                if roi and all(k in roi for k in ['x', 'y', 'width', 'height']):
+                    self.logger.info(f"Found ROI config (legacy format): {config_path}")
+                    return roi
+
+            except Exception as e:
+                self.logger.warning(f"Error loading ROI config {config_path}: {e}")
+
         return None
-    
+
     def _save_calibration_debug(self, frame: np.ndarray):
         """Save a debug image showing the detected ROI regions"""
         debug_frame = frame.copy()
-        
-        # Draw timecode ROI in green
+
         if self.reader.roi_timecode:
             roi = self.reader.roi_timecode
             cv2.rectangle(
@@ -1135,8 +1552,7 @@ class VideoAnalyser:
                 (roi['x'], roi['y'] - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
             )
-        
-        # Draw drop indicator ROI in red
+
         cv2.rectangle(
             debug_frame,
             (ROI_DROP['x'], ROI_DROP['y']),
@@ -1148,40 +1564,31 @@ class VideoAnalyser:
             (ROI_DROP['x'], ROI_DROP['y'] + ROI_DROP['height'] + 20),
             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1
         )
-        
-        # Save
+
         DEBUG_OUTPUT_DIR.mkdir(exist_ok=True)
         debug_path = DEBUG_OUTPUT_DIR / f"calibration_cam{self.camera_id}.png"
         cv2.imwrite(str(debug_path), debug_frame)
         self.logger.info(f"Saved calibration debug image: {debug_path}")
-    
+
     def analyse(self, progress_callback=None) -> bool:
-        """
-        Run full frame-by-frame analysis implementing Truth Table logic.
-        
-        OPTIMISED: Sequential frame reading, fast duplicate detection
-        """
+        """Run full frame-by-frame analysis implementing Truth Table logic."""
         if not self.reader or not self.metadata:
             self.logger.error("Must call load() before analyse()")
             return False
-        
+
         total = self.reader.total_frames
         self.stats['total_frames'] = total
-        
-        prev_frame: Optional[np.ndarray] = None
+
         prev_analysis: Optional[FrameAnalysis] = None
-        
+
         self.logger.info(f"Starting analysis of {total} frames...")
-        
-        # Progress tracking
+
         start_time = datetime.now()
         last_progress_pct = -1
-        
-        # Reset video to start for sequential reading
+
         self.reader.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        
+
         for frame_num in range(total):
-            # OPTIMISED: Sequential read instead of seeking
             frame = self.reader.read_next_frame()
             if frame is None:
                 analysis = FrameAnalysis(
@@ -1192,36 +1599,33 @@ class VideoAnalyser:
                 self.results.append(analysis)
                 self.stats['ocr_failures'] += 1
                 continue
-            
-            # Create analysis record
+
             analysis = FrameAnalysis(frame_number=frame_num)
-            
-            # Check drop indicator (has early-exit optimisation)
+
+            # Check drop indicator
             analysis.drop_indicator_present = self.reader.detect_drop_indicator(frame)
             if analysis.drop_indicator_present:
                 self.stats['indicated_drops'] += 1
-            
+
             # Extract timecode via OCR
             tc, raw = self.reader.extract_timecode(frame)
             analysis.visual_timecode = tc
             analysis.visual_timecode_raw = raw
-            
-            # PRIMARY: Timecode-based duplicate detection
-            # Compares actual timecode values - more reliable than image comparison
-            # At 60fps/30tc, each TC appears twice (normal), 3+ times = drop
+
+            # Timecode-based duplicate detection
             analysis.is_physical_duplicate = self.reader.check_timecode_duplicate(tc)
             if analysis.is_physical_duplicate:
                 self.stats['physical_drops'] += 1
-            
-            # Compute frame hash (optimised - no PIL conversion)
+
+            # Compute frame hash
             analysis.image_hash = self.reader.compute_frame_hash(frame)
-            
+
             # Apply Truth Table Logic
             analysis.status = self._apply_logic_gates(analysis, prev_analysis)
-            
-            # Update statistics based on status
+
+            # Update statistics
             self._update_stats(analysis)
-            
+
             # Debug: Save flagged frames
             if DEBUG and analysis.status in [
                 FrameStatus.CORRUPTION,
@@ -1230,22 +1634,20 @@ class VideoAnalyser:
                 FrameStatus.UNDETECTED_SKIP
             ]:
                 self._save_debug_frame(frame, analysis)
-            
+
             self.results.append(analysis)
-            
-            # Update for next iteration
             prev_analysis = analysis
-            
-            # Progress reporting - update every 1%
+
+            # Progress reporting
             current_pct = int((frame_num + 1) / total * 100)
             is_complete = frame_num == total - 1
-            
+
             if current_pct > last_progress_pct or is_complete:
                 last_progress_pct = current_pct
-                
+
                 elapsed_total = (datetime.now() - start_time).total_seconds()
                 fps_rate = (frame_num + 1) / elapsed_total if elapsed_total > 0 else 0
-                
+
                 if fps_rate > 0:
                     remaining_frames = total - frame_num - 1
                     eta_seconds = remaining_frames / fps_rate
@@ -1254,46 +1656,50 @@ class VideoAnalyser:
                     eta_str = f"{eta_min:3d}m {eta_sec:02d}s"
                 else:
                     eta_str = "calculating..."
-                
+
                 bar_width = 30
                 filled = int(bar_width * current_pct // 100)
                 bar = "=" * filled + ">" + " " * (bar_width - filled - 1) if current_pct < 100 else "=" * bar_width
-                
+
                 sys.stdout.write(f"\r  [{bar}] {current_pct:3d}% | {frame_num + 1:6d}/{total} frames | {fps_rate:5.1f} fps | ETA: {eta_str}")
                 sys.stdout.flush()
-            
-            # Legacy callback support
+
             if progress_callback and frame_num % 100 == 0:
                 progress_callback(frame_num, total)
-        
-        # Final newline
+
         print()
-        
+
         elapsed = (datetime.now() - start_time).total_seconds()
         self.logger.info(f"Analysis complete in {elapsed:.1f}s ({total/elapsed:.1f} fps average)")
+
+        # Print OCR statistics
+        ocr_stats = self.reader.ocr_pipeline.stats
+        success_rate = (ocr_stats['successes'] / ocr_stats['attempts'] * 100) if ocr_stats['attempts'] > 0 else 0
+        self.logger.info(f"OCR Stats: {ocr_stats['successes']}/{ocr_stats['attempts']} ({success_rate:.1f}% success)")
+        if ocr_stats['tesseract_wins'] > 0 or ocr_stats['easyocr_wins'] > 0:
+            self.logger.info(f"  Tesseract wins: {ocr_stats['tesseract_wins']}, EasyOCR wins: {ocr_stats['easyocr_wins']}")
+
         return True
-    
+
     def _apply_logic_gates(
-        self, 
-        current: FrameAnalysis, 
+        self,
+        current: FrameAnalysis,
         previous: Optional[FrameAnalysis]
     ) -> FrameStatus:
-        """
-        Apply the Truth Table logic gates to determine frame status.
-        """
+        """Apply the Truth Table logic gates to determine frame status."""
         # Logic Gate 2: Drop Frame Verification
         if current.is_physical_duplicate and current.drop_indicator_present:
-            return FrameStatus.DROPPED_DETECTED  # Successful Process
-        
+            return FrameStatus.DROPPED_DETECTED
+
         if current.is_physical_duplicate and not current.drop_indicator_present:
             current.notes = "Physical duplicate without indicator"
-            return FrameStatus.DROPPED_UNDETECTED  # False Negative
-        
+            return FrameStatus.DROPPED_UNDETECTED
+
         if not current.is_physical_duplicate and current.drop_indicator_present:
             current.notes = "Indicator present but no physical duplicate"
-            return FrameStatus.FALSE_POSITIVE  # False Positive
-        
-        # Logic Gate 1: Continuity & Corruption (requires previous frame)
+            return FrameStatus.FALSE_POSITIVE
+
+        # Logic Gate 1: Continuity & Corruption
         if previous and previous.visual_timecode and current.visual_timecode:
             prev_tc_frames = previous.visual_timecode.to_frames(
                 self.metadata.frame_rate if self.metadata else 60
@@ -1301,27 +1707,24 @@ class VideoAnalyser:
             curr_tc_frames = current.visual_timecode.to_frames(
                 self.metadata.frame_rate if self.metadata else 60
             )
-            
-            expected_next = prev_tc_frames + 1
+
             actual_diff = curr_tc_frames - prev_tc_frames
-            
-            # Check for corruption (illogical jump)
+
             if abs(actual_diff) > TIMECODE_JUMP_THRESHOLD:
                 current.notes = f"Timecode jump: {previous.visual_timecode} -> {current.visual_timecode}"
                 return FrameStatus.CORRUPTION
-            
-            # Check for undetected skip (timecode skips but frame is not duplicate)
+
             if actual_diff > 1 and not current.is_physical_duplicate:
                 current.notes = f"Skipped {actual_diff - 1} timecode frames without duplicate"
                 return FrameStatus.UNDETECTED_SKIP
-        
+
         # OCR failure check
         if current.visual_timecode is None and current.frame_number > 0:
             current.notes = f"OCR failed, raw: {current.visual_timecode_raw}"
             return FrameStatus.OCR_FAILURE
-        
+
         return FrameStatus.NORMAL
-    
+
     def _update_stats(self, analysis: FrameAnalysis):
         """Update statistics based on frame status"""
         status_map = {
@@ -1332,16 +1735,15 @@ class VideoAnalyser:
             FrameStatus.UNDETECTED_SKIP: 'undetected_skips',
             FrameStatus.OCR_FAILURE: 'ocr_failures'
         }
-        
+
         if analysis.status in status_map:
             self.stats[status_map[analysis.status]] += 1
-    
+
     def _save_debug_frame(self, frame: np.ndarray, analysis: FrameAnalysis):
         """Save debug screenshot for flagged frame"""
         filename = f"cam{self.camera_id}_frame{analysis.frame_number:06d}_{analysis.status.name}.png"
         filepath = DEBUG_OUTPUT_DIR / filename
-        
-        # Add annotation
+
         annotated = frame.copy()
         text = f"Frame {analysis.frame_number}: {analysis.status.name}"
         cv2.putText(
@@ -1353,62 +1755,41 @@ class VideoAnalyser:
                 annotated, analysis.notes, (10, 60),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1
             )
-        
+
         cv2.imwrite(str(filepath), annotated)
-    
+
     def get_frame_zero_timecode(self) -> Optional[Timecode]:
-        """
-        Get the timecode from the start of the video.
-        
-        Since OCR can be unreliable, this searches the first N frames
-        for the first valid timecode reading, rather than requiring
-        frame 0 specifically to have a valid OCR result.
-        """
+        """Get the timecode from the start of the video."""
         if not self.results:
             return None
-        
-        # Search first 50 frames for a valid timecode
+
         search_limit = min(50, len(self.results))
         for i in range(search_limit):
             if self.results[i].visual_timecode is not None:
-                # Found a valid timecode - extrapolate back to frame 0
                 tc = self.results[i].visual_timecode
-                # At 60fps/30tc (multiplier 2), each TC covers 2 frames
-                # So frame i corresponds to TC frame i//multiplier
-                # For frame 0, we need to subtract i//multiplier from the found TC
-                multiplier = 2  # TODO: get from reader
+                multiplier = self.reader.frame_rate_multiplier if self.reader else 2
                 tc_frames_offset = i // multiplier
-                
-                # Create frame 0 timecode by subtracting the offset
-                frame0_tc = Timecode(
-                    hours=tc.hours,
-                    minutes=tc.minutes,
-                    seconds=tc.seconds,
-                    frames=tc.frames
-                )
-                # Subtract frames (handling underflow)
-                total_frames = frame0_tc.to_frames() - tc_frames_offset
+
+                total_frames = tc.to_frames() - tc_frames_offset
                 if total_frames >= 0:
-                    return Timecode.from_frame_number(total_frames, tc.fps)
+                    fps = self.metadata.frame_rate if self.metadata else 60
+                    return Timecode.from_frame_number(total_frames, fps)
                 else:
-                    return tc  # Can't extrapolate, return as-is
-        
+                    return tc
+
         return None
-    
+
     def get_first_valid_timecode(self) -> Optional[Tuple[int, Timecode]]:
-        """
-        Get the first valid timecode and its frame number.
-        Returns (frame_number, timecode) or None if no valid TC found.
-        """
+        """Get the first valid timecode and its frame number."""
         if not self.results:
             return None
-        
+
         for result in self.results:
             if result.visual_timecode is not None:
                 return (result.frame_number, result.visual_timecode)
-        
+
         return None
-    
+
     def cleanup(self):
         """Release resources"""
         if self.reader:
@@ -1424,7 +1805,7 @@ class DualCameraValidator:
     Validates dual-stream recordings (Camera A and B).
     Performs sync verification and generates comprehensive reports.
     """
-    
+
     def __init__(
         self,
         video_a: Path,
@@ -1439,76 +1820,58 @@ class DualCameraValidator:
         self.analyser_b = VideoAnalyser(video_b, metadata_b, "B")
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
-        
-        # Store ROI configs for manual calibration
+
         self._roi_a = roi_a
         self._roi_b = roi_b
-        
+
         self.validation_results: Dict[str, Any] = {}
         self.logger = logging.getLogger("DualCameraValidator")
-    
+
     def run_full_validation(self, progress_callback=None, save_calibration_debug: bool = True) -> bool:
         """Execute complete validation pipeline"""
         self.logger.info("=" * 60)
         self.logger.info("Starting Dual Camera Validation")
         self.logger.info("=" * 60)
-        
-        # Load both cameras
+
         if not self.analyser_a.load():
             self.logger.error("Failed to load Camera A")
             return False
-        
+
         if not self.analyser_b.load():
             self.logger.error("Failed to load Camera B")
             return False
-        
-        # Calibrate timecode detection with manual ROI if provided
+
         self.analyser_a.calibrate(save_debug=save_calibration_debug, manual_roi=self._roi_a)
         self.analyser_b.calibrate(save_debug=save_calibration_debug, manual_roi=self._roi_b)
-        
-        # Run analysis on both cameras
+
         print("\n  Analysing Camera A (Left)...")
         self.analyser_a.analyse(progress_callback)
-        
+
         print("\n  Analysing Camera B (Right)...")
         self.analyser_b.analyse(progress_callback)
-        
-        # Run validation checks
+
         self._validate_sync()
         self._validate_corruption()
         self._validate_drop_accuracy()
         self._validate_start_timecode()
-        
-        # Cleanup
+
         self.analyser_a.cleanup()
         self.analyser_b.cleanup()
-        
+
         return True
-    
+
     def _validate_sync(self):
-        """
-        Validate dual-camera synchronisation.
-        
-        Compares start timecodes from:
-        1. First valid OCR timecode (extrapolated to frame 0)
-        2. Metadata start timecode as fallback
-        
-        Cameras are synced if they have matching start timecodes.
-        """
+        """Validate dual-camera synchronisation."""
         tc_a = self.analyser_a.get_frame_zero_timecode()
         tc_b = self.analyser_b.get_frame_zero_timecode()
-        
-        # Get metadata timecodes as fallback
+
         meta_tc_a = self.analyser_a.metadata.start_timecode if self.analyser_a.metadata else None
         meta_tc_b = self.analyser_b.metadata.start_timecode if self.analyser_b.metadata else None
-        
-        # Determine sync status
+
         if tc_a and tc_b:
-            # Both have valid OCR - compare them
             sync_pass = tc_a == tc_b
             source = "OCR"
         elif meta_tc_a and meta_tc_b:
-            # Fall back to metadata comparison
             sync_pass = meta_tc_a == meta_tc_b
             source = "metadata"
             tc_a = meta_tc_a
@@ -1516,8 +1879,7 @@ class DualCameraValidator:
         else:
             sync_pass = False
             source = "unknown"
-        
-        # Build notes
+
         if sync_pass:
             notes = f"Cameras synced (verified via {source})"
         elif tc_a is None and tc_b is None:
@@ -1528,26 +1890,25 @@ class DualCameraValidator:
             notes = "Camera B timecode unavailable"
         else:
             notes = f"Frame 0 timecodes do not match ({source})"
-        
+
         self.validation_results['sync'] = {
             'status': 'PASS' if sync_pass else 'FAIL',
             'camera_a_frame0_tc': str(tc_a) if tc_a else 'N/A',
             'camera_b_frame0_tc': str(tc_b) if tc_b else 'N/A',
             'notes': notes
         }
-    
+
     def _validate_corruption(self):
         """Validate corruption detection against metadata"""
         results = {}
-        
+
         for cam_id, analyser in [('A', self.analyser_a), ('B', self.analyser_b)]:
             detected_corruptions = analyser.stats['corruptions']
             metadata_corruption = analyser.metadata.corrupted_at if analyser.metadata else -1
-            
-            # Check if metadata reports corruption
+
             metadata_reports_corruption = metadata_corruption >= 0
             vision_detected_corruption = detected_corruptions > 0
-            
+
             if metadata_reports_corruption and not vision_detected_corruption:
                 status = 'FAIL'
                 notes = f'Metadata reports corruption at frame {metadata_corruption}, but vision found none'
@@ -1560,35 +1921,33 @@ class DualCameraValidator:
             else:
                 status = 'PASS'
                 notes = 'No corruption detected'
-            
+
             results[cam_id] = {
                 'status': status,
                 'metadata_corrupted_at': metadata_corruption,
                 'vision_corruptions_detected': detected_corruptions,
                 'notes': notes
             }
-        
+
         self.validation_results['corruption'] = results
-    
+
     def _validate_drop_accuracy(self):
         """Validate drop frame counts against metadata"""
         results = {}
-        
+
         for cam_id, analyser in [('A', self.analyser_a), ('B', self.analyser_b)]:
             if not analyser.metadata:
                 continue
-            
+
             metadata_drops = analyser.metadata.dropped_frames
             detected_drops = analyser.stats['physical_drops']
             indicated_drops = analyser.stats['indicated_drops']
             successful_drops = analyser.stats['successful_drops']
             false_negatives = analyser.stats['false_negatives']
             false_positives = analyser.stats['false_positives']
-            
-            # Accuracy check
+
             drop_match = metadata_drops == detected_drops
-            indicator_match = metadata_drops == indicated_drops
-            
+
             results[cam_id] = {
                 'metadata_drop_count': metadata_drops,
                 'physical_drops_detected': detected_drops,
@@ -1599,33 +1958,25 @@ class DualCameraValidator:
                 'drop_count_match': 'PASS' if drop_match else 'FAIL',
                 'indicator_accuracy': 'PASS' if false_negatives == 0 and false_positives == 0 else 'FAIL'
             }
-        
+
         self.validation_results['drop_accuracy'] = results
-    
+
     def _validate_start_timecode(self):
-        """
-        Validate that OCR-detected start timecode matches metadata.
-        
-        Allows for small tolerance since:
-        - OCR might succeed on frame 5 instead of frame 0
-        - Extrapolation introduces small errors
-        - Frame rate conversion might cause ±1 frame difference
-        """
+        """Validate that OCR-detected start timecode matches metadata."""
         results = {}
-        
+
         for cam_id, analyser in [('A', self.analyser_a), ('B', self.analyser_b)]:
             if not analyser.metadata:
                 continue
-            
+
             ocr_tc = analyser.get_frame_zero_timecode()
             metadata_tc = analyser.metadata.start_timecode
-            
+
             if ocr_tc and metadata_tc:
-                # Allow tolerance of ±2 timecode frames
                 ocr_frames = ocr_tc.to_frames()
                 meta_frames = metadata_tc.to_frames()
                 diff = abs(ocr_frames - meta_frames)
-                
+
                 if diff <= 2:
                     match = True
                     notes = "" if diff == 0 else f"Within tolerance (±{diff} frames)"
@@ -1633,373 +1984,293 @@ class DualCameraValidator:
                     match = False
                     notes = f"Start timecode mismatch (diff: {diff} frames)"
             elif metadata_tc and not ocr_tc:
-                # OCR failed but we have metadata - not a failure, just a warning
-                match = True  # Trust metadata
+                match = True
                 notes = "OCR unavailable, using metadata"
             else:
                 match = False
                 notes = "No timecode available"
-            
+
             results[cam_id] = {
                 'status': 'PASS' if match else 'FAIL',
                 'ocr_frame0_tc': str(ocr_tc) if ocr_tc else 'N/A',
                 'metadata_start_tc': str(metadata_tc) if metadata_tc else 'N/A',
                 'notes': notes
             }
-        
+
         self.validation_results['start_timecode'] = results
-    
+
     def generate_report(self) -> Tuple[str, str]:
-        """
-        Generate validation report in both text and HTML formats.
-        Returns (text_report, html_report) paths.
-        """
+        """Generate validation report in both text and HTML formats."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Generate text report
+
+        # Text report
+        text_lines = self._generate_text_report()
         text_path = self.output_dir / f"qa_report_{timestamp}.txt"
-        text_content = self._generate_text_report()
         with open(text_path, 'w') as f:
-            f.write(text_content)
-        
-        # Generate HTML report
-        html_path = self.output_dir / f"qa_report_{timestamp}.html"
+            f.write('\n'.join(text_lines))
+
+        # HTML report
         html_content = self._generate_html_report()
+        html_path = self.output_dir / f"qa_report_{timestamp}.html"
         with open(html_path, 'w') as f:
             f.write(html_content)
-        
-        # Generate JSON report (machine-readable)
+
+        # JSON report
         json_path = self.output_dir / f"qa_report_{timestamp}.json"
-        self._generate_json_report(json_path)
-        
-        # Generate detailed CSV of all frames
-        csv_path_a = self.output_dir / f"frame_analysis_cam_a_{timestamp}.csv"
-        csv_path_b = self.output_dir / f"frame_analysis_cam_b_{timestamp}.csv"
-        self._generate_frame_csv(self.analyser_a, csv_path_a)
-        self._generate_frame_csv(self.analyser_b, csv_path_b)
-        
-        self.logger.info(f"Reports generated in {self.output_dir}")
-        
+        with open(json_path, 'w') as f:
+            json.dump({
+                'generated_at': datetime.now().isoformat(),
+                'validation_results': self.validation_results,
+                'camera_a_stats': self.analyser_a.stats,
+                'camera_b_stats': self.analyser_b.stats,
+                'camera_a_metadata': {
+                    'filename': self.analyser_a.metadata.filename if self.analyser_a.metadata else '',
+                    'frame_rate': self.analyser_a.metadata.frame_rate if self.analyser_a.metadata else 0,
+                    'num_frames': self.analyser_a.metadata.num_frames if self.analyser_a.metadata else 0,
+                    'dropped_frames': self.analyser_a.metadata.dropped_frames if self.analyser_a.metadata else 0,
+                    'start_timecode': str(self.analyser_a.metadata.start_timecode) if self.analyser_a.metadata else ''
+                },
+                'camera_b_metadata': {
+                    'filename': self.analyser_b.metadata.filename if self.analyser_b.metadata else '',
+                    'frame_rate': self.analyser_b.metadata.frame_rate if self.analyser_b.metadata else 0,
+                    'num_frames': self.analyser_b.metadata.num_frames if self.analyser_b.metadata else 0,
+                    'dropped_frames': self.analyser_b.metadata.dropped_frames if self.analyser_b.metadata else 0,
+                    'start_timecode': str(self.analyser_b.metadata.start_timecode) if self.analyser_b.metadata else ''
+                }
+            }, f, indent=2)
+
+        self.logger.info(f"Reports saved to: {self.output_dir}")
+
         return str(text_path), str(html_path)
-    
-    def _generate_text_report(self) -> str:
-        """Generate plain text report"""
-        lines = []
-        lines.append("=" * 70)
-        lines.append("VIDEO QA VALIDATION REPORT")
-        lines.append("=" * 70)
-        lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        lines.append("")
-        
-        # Camera Info
-        lines.append("-" * 70)
-        lines.append("CAMERA INFORMATION")
-        lines.append("-" * 70)
+
+    def _generate_text_report(self) -> List[str]:
+        """Generate text format report"""
+        lines = [
+            "=" * 80,
+            "VIDEO QA VALIDATION REPORT",
+            "=" * 80,
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "",
+            "-" * 80,
+            "CAMERA INFORMATION",
+            "-" * 80
+        ]
+
         for cam_id, analyser in [('A', self.analyser_a), ('B', self.analyser_b)]:
             if analyser.metadata:
-                lines.append(f"Camera {cam_id}: {analyser.metadata.filename}")
-                lines.append(f"  Frames: {analyser.metadata.num_frames}")
-                lines.append(f"  Frame Rate: {analyser.metadata.frame_rate} fps")
-                lines.append(f"  Start TC: {analyser.metadata.start_timecode}")
-                lines.append("")
-        
-        # Sync Status
-        lines.append("-" * 70)
-        lines.append("1. SYNC STATUS")
-        lines.append("-" * 70)
+                lines.extend([
+                    f"Camera {cam_id}: {analyser.metadata.filename}",
+                    f"  Frames: {analyser.metadata.num_frames}",
+                    f"  Frame Rate: {analyser.metadata.frame_rate} fps",
+                    f"  Start TC: {analyser.metadata.start_timecode}",
+                    ""
+                ])
+
+        # Sync status
+        lines.extend([
+            "-" * 80,
+            "1. SYNC STATUS",
+            "-" * 80
+        ])
         sync = self.validation_results.get('sync', {})
-        lines.append(f"Status: {sync.get('status', 'N/A')}")
-        lines.append(f"Camera A Frame 0 TC: {sync.get('camera_a_frame0_tc', 'N/A')}")
-        lines.append(f"Camera B Frame 0 TC: {sync.get('camera_b_frame0_tc', 'N/A')}")
-        if sync.get('notes'):
-            lines.append(f"Notes: {sync.get('notes')}")
-        lines.append("")
-        
-        # Corruption Status
-        lines.append("-" * 70)
-        lines.append("2. CORRUPTION STATUS")
-        lines.append("-" * 70)
+        lines.extend([
+            f"Status: {sync.get('status', 'N/A')}",
+            f"Camera A Frame 0 TC: {sync.get('camera_a_frame0_tc', 'N/A')}",
+            f"Camera B Frame 0 TC: {sync.get('camera_b_frame0_tc', 'N/A')}",
+            f"Notes: {sync.get('notes', '')}",
+            ""
+        ])
+
+        # Corruption status
+        lines.extend([
+            "-" * 80,
+            "2. CORRUPTION STATUS",
+            "-" * 80
+        ])
         corruption = self.validation_results.get('corruption', {})
         for cam_id in ['A', 'B']:
             cam_data = corruption.get(cam_id, {})
-            lines.append(f"Camera {cam_id}:")
-            lines.append(f"  Status: {cam_data.get('status', 'N/A')}")
-            lines.append(f"  Metadata Corrupted At: {cam_data.get('metadata_corrupted_at', 'N/A')}")
-            lines.append(f"  Vision Corruptions: {cam_data.get('vision_corruptions_detected', 'N/A')}")
-            lines.append(f"  Notes: {cam_data.get('notes', '')}")
-            lines.append("")
-        
-        # Drop Frame Accuracy
-        lines.append("-" * 70)
-        lines.append("3. DROP FRAME ACCURACY")
-        lines.append("-" * 70)
+            lines.extend([
+                f"Camera {cam_id}:",
+                f"  Status: {cam_data.get('status', 'N/A')}",
+                f"  Metadata Corrupted At: {cam_data.get('metadata_corrupted_at', 'N/A')}",
+                f"  Vision Corruptions: {cam_data.get('vision_corruptions_detected', 'N/A')}",
+                f"  Notes: {cam_data.get('notes', '')}",
+                ""
+            ])
+
+        # Drop accuracy
+        lines.extend([
+            "-" * 80,
+            "3. DROP FRAME ACCURACY",
+            "-" * 80,
+            f"{'Metric':<35} {'Camera A':>15} {'Camera B':>15}",
+            "-" * 65
+        ])
         drop_data = self.validation_results.get('drop_accuracy', {})
-        
-        # Create table
-        lines.append(f"{'Metric':<30} {'Camera A':>15} {'Camera B':>15}")
-        lines.append("-" * 60)
-        
         metrics = [
-            ('Metadata Drop Count', 'metadata_drop_count'),
-            ('Physical Drops Detected', 'physical_drops_detected'),
-            ('Indicator Drops Counted', 'indicator_drops_counted'),
-            ('Successful Processes', 'successful_processes'),
-            ('False Negatives', 'false_negatives'),
-            ('False Positives', 'false_positives'),
-            ('Drop Count Match', 'drop_count_match'),
-            ('Indicator Accuracy', 'indicator_accuracy')
+            ('metadata_drop_count', 'Metadata Drop Count'),
+            ('physical_drops_detected', 'Physical Drops Detected'),
+            ('indicator_drops_counted', 'Indicator Drops Counted'),
+            ('successful_processes', 'Successful Processes'),
+            ('false_negatives', 'False Negatives'),
+            ('false_positives', 'False Positives'),
+            ('drop_count_match', 'Drop Count Match'),
+            ('indicator_accuracy', 'Indicator Accuracy')
         ]
-        
-        for label, key in metrics:
+        for key, label in metrics:
             val_a = drop_data.get('A', {}).get(key, 'N/A')
             val_b = drop_data.get('B', {}).get(key, 'N/A')
-            lines.append(f"{label:<30} {str(val_a):>15} {str(val_b):>15}")
-        
+            lines.append(f"{label:<35} {str(val_a):>15} {str(val_b):>15}")
         lines.append("")
-        
-        # Start Timecode
-        lines.append("-" * 70)
-        lines.append("4. START TIMECODE VALIDATION")
-        lines.append("-" * 70)
+
+        # Start timecode
+        lines.extend([
+            "-" * 80,
+            "4. START TIMECODE VALIDATION",
+            "-" * 80
+        ])
         start_tc = self.validation_results.get('start_timecode', {})
         for cam_id in ['A', 'B']:
             cam_data = start_tc.get(cam_id, {})
-            lines.append(f"Camera {cam_id}:")
-            lines.append(f"  Status: {cam_data.get('status', 'N/A')}")
-            lines.append(f"  OCR Frame 0: {cam_data.get('ocr_frame0_tc', 'N/A')}")
-            lines.append(f"  Metadata: {cam_data.get('metadata_start_tc', 'N/A')}")
-            lines.append("")
-        
-        # Indicator Health Summary
-        lines.append("-" * 70)
-        lines.append("5. INDICATOR HEALTH SUMMARY")
-        lines.append("-" * 70)
-        
-        for cam_id, analyser in [('A', self.analyser_a), ('B', self.analyser_b)]:
-            fn = analyser.stats['false_negatives']
-            fp = analyser.stats['false_positives']
-            lines.append(f"Camera {cam_id}:")
-            if fn == 0 and fp == 0:
-                lines.append("  All drop indicators correctly reported")
-            else:
-                if fn > 0:
-                    lines.append(f"  False Negatives (missed drops): {fn}")
-                if fp > 0:
-                    lines.append(f"  False Positives (ghost reports): {fp}")
-            lines.append("")
-        
-        # Overall Summary
-        lines.append("=" * 70)
-        lines.append("OVERALL VALIDATION RESULT")
-        lines.append("=" * 70)
-        
-        all_pass = all([
+            lines.extend([
+                f"Camera {cam_id}:",
+                f"  Status: {cam_data.get('status', 'N/A')}",
+                f"  OCR Frame 0: {cam_data.get('ocr_frame0_tc', 'N/A')}",
+                f"  Metadata: {cam_data.get('metadata_start_tc', 'N/A')}",
+                f"  Notes: {cam_data.get('notes', '')}",
+                ""
+            ])
+
+        # Overall result
+        overall_pass = all([
             sync.get('status') == 'PASS',
             all(c.get('status') == 'PASS' for c in corruption.values()),
             all(d.get('drop_count_match') == 'PASS' for d in drop_data.values()),
-            all(d.get('indicator_accuracy') == 'PASS' for d in drop_data.values()),
             all(s.get('status') == 'PASS' for s in start_tc.values())
         ])
-        
-        lines.append(f"RESULT: {'PASS' if all_pass else 'FAIL'}")
-        lines.append("")
-        
-        return '\n'.join(lines)
-    
+
+        lines.extend([
+            "=" * 80,
+            f"OVERALL RESULT: {'PASS' if overall_pass else 'FAIL'}",
+            "=" * 80
+        ])
+
+        return lines
+
     def _generate_html_report(self) -> str:
-        """Generate HTML report with styling"""
+        """Generate HTML format report"""
         sync = self.validation_results.get('sync', {})
         corruption = self.validation_results.get('corruption', {})
         drop_data = self.validation_results.get('drop_accuracy', {})
         start_tc = self.validation_results.get('start_timecode', {})
-        
-        def status_class(status):
-            if status == 'PASS':
-                return 'pass'
-            elif status == 'FAIL':
-                return 'fail'
-            return 'warning'
-        
+
+        overall_pass = all([
+            sync.get('status') == 'PASS',
+            all(c.get('status') == 'PASS' for c in corruption.values()),
+            all(d.get('drop_count_match') == 'PASS' for d in drop_data.values()),
+            all(s.get('status') == 'PASS' for s in start_tc.values())
+        ])
+
         html = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Video QA Validation Report</title>
+    <title>Video QA Report</title>
     <style>
         :root {{
             --pass-color: #28a745;
             --fail-color: #dc3545;
             --warning-color: #ffc107;
-            --bg-color: #f8f9fa;
-            --border-color: #dee2e6;
         }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             max-width: 1200px;
             margin: 0 auto;
             padding: 20px;
-            background-color: var(--bg-color);
-            color: #212529;
+            background-color: #f8f9fa;
         }}
-        h1 {{
-            text-align: center;
-            color: #343a40;
-            border-bottom: 3px solid #6c757d;
-            padding-bottom: 15px;
+        h1, h2 {{ color: #343a40; }}
+        .status-pass {{ color: var(--pass-color); font-weight: bold; }}
+        .status-fail {{ color: var(--fail-color); font-weight: bold; }}
+        .status-warning {{ color: var(--warning-color); font-weight: bold; }}
+        .card {{
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }}
-        h2 {{
-            color: #495057;
-            border-bottom: 2px solid var(--border-color);
-            padding-bottom: 10px;
-            margin-top: 30px;
-        }}
-        .timestamp {{
-            text-align: center;
-            color: #6c757d;
-            margin-bottom: 30px;
-        }}
-        .status-badge {{
-            display: inline-block;
-            padding: 5px 15px;
-            border-radius: 20px;
-            font-weight: bold;
-            color: white;
-        }}
-        .pass {{ background-color: var(--pass-color); }}
-        .fail {{ background-color: var(--fail-color); }}
-        .warning {{ background-color: var(--warning-color); color: #212529; }}
         table {{
             width: 100%;
             border-collapse: collapse;
             margin: 15px 0;
-            background: white;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
         }}
         th, td {{
-            padding: 12px 15px;
+            padding: 10px 15px;
             text-align: left;
-            border-bottom: 1px solid var(--border-color);
+            border-bottom: 1px solid #dee2e6;
         }}
-        th {{
-            background-color: #343a40;
-            color: white;
-        }}
-        tr:hover {{
-            background-color: #f1f3f4;
-        }}
-        .section {{
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }}
+        th {{ background-color: #343a40; color: white; }}
+        tr:hover {{ background-color: #f1f3f4; }}
         .overall-result {{
             text-align: center;
             padding: 30px;
-            font-size: 24px;
             border-radius: 8px;
-            margin-top: 30px;
+            margin: 20px 0;
+            font-size: 24px;
+            font-weight: bold;
         }}
-        .overall-pass {{
-            background-color: #d4edda;
-            border: 2px solid var(--pass-color);
-        }}
-        .overall-fail {{
-            background-color: #f8d7da;
-            border: 2px solid var(--fail-color);
-        }}
-        .camera-info {{
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-        }}
-        .camera-card {{
-            background: #e9ecef;
-            padding: 15px;
-            border-radius: 5px;
-        }}
-        .notes {{
-            color: #6c757d;
-            font-style: italic;
-        }}
+        .overall-pass {{ background-color: #d4edda; color: #155724; }}
+        .overall-fail {{ background-color: #f8d7da; color: #721c24; }}
     </style>
 </head>
 <body>
     <h1>Video QA Validation Report</h1>
-    <p class="timestamp">Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-    
-    <div class="section">
-        <h2>Camera Information</h2>
-        <div class="camera-info">
-'''
-        
-        for cam_id, analyser in [('A', self.analyser_a), ('B', self.analyser_b)]:
-            if analyser.metadata:
-                html += f'''
-            <div class="camera-card">
-                <h3>Camera {cam_id}</h3>
-                <p><strong>File:</strong> {analyser.metadata.filename}</p>
-                <p><strong>Frames:</strong> {analyser.metadata.num_frames}</p>
-                <p><strong>Frame Rate:</strong> {analyser.metadata.frame_rate} fps</p>
-                <p><strong>Start TC:</strong> {analyser.metadata.start_timecode}</p>
-            </div>
-'''
-        
-        html += f'''
-        </div>
+    <p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+
+    <div class="overall-result {'overall-pass' if overall_pass else 'overall-fail'}">
+        OVERALL RESULT: {'PASS' if overall_pass else 'FAIL'}
     </div>
-    
-    <div class="section">
+
+    <div class="card">
         <h2>1. Sync Status</h2>
-        <p>Status: <span class="status-badge {status_class(sync.get('status'))}">{sync.get('status', 'N/A')}</span></p>
+        <p>Status: <span class="status-{sync.get('status', 'fail').lower()}">{sync.get('status', 'N/A')}</span></p>
         <table>
-            <tr>
-                <th>Camera</th>
-                <th>Frame 0 Timecode</th>
-            </tr>
-            <tr>
-                <td>Camera A</td>
-                <td>{sync.get('camera_a_frame0_tc', 'N/A')}</td>
-            </tr>
-            <tr>
-                <td>Camera B</td>
-                <td>{sync.get('camera_b_frame0_tc', 'N/A')}</td>
-            </tr>
+            <tr><td>Camera A Frame 0 TC</td><td>{sync.get('camera_a_frame0_tc', 'N/A')}</td></tr>
+            <tr><td>Camera B Frame 0 TC</td><td>{sync.get('camera_b_frame0_tc', 'N/A')}</td></tr>
+            <tr><td>Notes</td><td>{sync.get('notes', '')}</td></tr>
         </table>
-        {f'<p class="notes">Notes: {sync.get("notes")}</p>' if sync.get('notes') else ''}
     </div>
-    
-    <div class="section">
+
+    <div class="card">
         <h2>2. Corruption Status</h2>
         <table>
             <tr>
-                <th>Camera</th>
-                <th>Status</th>
-                <th>Metadata Corrupted At</th>
-                <th>Vision Corruptions</th>
-                <th>Notes</th>
+                <th>Metric</th>
+                <th>Camera A</th>
+                <th>Camera B</th>
             </tr>
-'''
-        
-        for cam_id in ['A', 'B']:
-            cam_data = corruption.get(cam_id, {})
-            html += f'''
             <tr>
-                <td>Camera {cam_id}</td>
-                <td><span class="status-badge {status_class(cam_data.get('status'))}">{cam_data.get('status', 'N/A')}</span></td>
-                <td>{cam_data.get('metadata_corrupted_at', 'N/A')}</td>
-                <td>{cam_data.get('vision_corruptions_detected', 'N/A')}</td>
-                <td class="notes">{cam_data.get('notes', '')}</td>
+                <td>Status</td>
+                <td class="status-{corruption.get('A', {}).get('status', 'fail').lower()}">{corruption.get('A', {}).get('status', 'N/A')}</td>
+                <td class="status-{corruption.get('B', {}).get('status', 'fail').lower()}">{corruption.get('B', {}).get('status', 'N/A')}</td>
             </tr>
-'''
-        
-        html += f'''
+            <tr>
+                <td>Metadata Corrupted At</td>
+                <td>{corruption.get('A', {}).get('metadata_corrupted_at', 'N/A')}</td>
+                <td>{corruption.get('B', {}).get('metadata_corrupted_at', 'N/A')}</td>
+            </tr>
+            <tr>
+                <td>Vision Corruptions</td>
+                <td>{corruption.get('A', {}).get('vision_corruptions_detected', 'N/A')}</td>
+                <td>{corruption.get('B', {}).get('vision_corruptions_detected', 'N/A')}</td>
+            </tr>
         </table>
     </div>
-    
-    <div class="section">
+
+    <div class="card">
         <h2>3. Drop Frame Accuracy</h2>
         <table>
             <tr>
@@ -2007,199 +2278,125 @@ class DualCameraValidator:
                 <th>Camera A</th>
                 <th>Camera B</th>
             </tr>
-'''
-        
-        metrics = [
-            ('Metadata Drop Count', 'metadata_drop_count'),
-            ('Physical Drops Detected', 'physical_drops_detected'),
-            ('Indicator Drops Counted', 'indicator_drops_counted'),
-            ('Successful Processes', 'successful_processes'),
-            ('False Negatives', 'false_negatives'),
-            ('False Positives', 'false_positives'),
-            ('Drop Count Match', 'drop_count_match'),
-            ('Indicator Accuracy', 'indicator_accuracy')
-        ]
-        
-        for label, key in metrics:
-            val_a = drop_data.get('A', {}).get(key, 'N/A')
-            val_b = drop_data.get('B', {}).get(key, 'N/A')
-            
-            # Format status values with badges
-            if key in ['drop_count_match', 'indicator_accuracy']:
-                val_a = f'<span class="status-badge {status_class(val_a)}">{val_a}</span>'
-                val_b = f'<span class="status-badge {status_class(val_b)}">{val_b}</span>'
-            
-            html += f'''
             <tr>
-                <td>{label}</td>
-                <td>{val_a}</td>
-                <td>{val_b}</td>
+                <td>Metadata Drop Count</td>
+                <td>{drop_data.get('A', {}).get('metadata_drop_count', 'N/A')}</td>
+                <td>{drop_data.get('B', {}).get('metadata_drop_count', 'N/A')}</td>
             </tr>
-'''
-        
-        html += f'''
+            <tr>
+                <td>Physical Drops Detected</td>
+                <td>{drop_data.get('A', {}).get('physical_drops_detected', 'N/A')}</td>
+                <td>{drop_data.get('B', {}).get('physical_drops_detected', 'N/A')}</td>
+            </tr>
+            <tr>
+                <td>Indicator Drops Counted</td>
+                <td>{drop_data.get('A', {}).get('indicator_drops_counted', 'N/A')}</td>
+                <td>{drop_data.get('B', {}).get('indicator_drops_counted', 'N/A')}</td>
+            </tr>
+            <tr>
+                <td>Successful Processes</td>
+                <td>{drop_data.get('A', {}).get('successful_processes', 'N/A')}</td>
+                <td>{drop_data.get('B', {}).get('successful_processes', 'N/A')}</td>
+            </tr>
+            <tr>
+                <td>False Negatives</td>
+                <td>{drop_data.get('A', {}).get('false_negatives', 'N/A')}</td>
+                <td>{drop_data.get('B', {}).get('false_negatives', 'N/A')}</td>
+            </tr>
+            <tr>
+                <td>False Positives</td>
+                <td>{drop_data.get('A', {}).get('false_positives', 'N/A')}</td>
+                <td>{drop_data.get('B', {}).get('false_positives', 'N/A')}</td>
+            </tr>
+            <tr>
+                <td>Drop Count Match</td>
+                <td class="status-{drop_data.get('A', {}).get('drop_count_match', 'fail').lower()}">{drop_data.get('A', {}).get('drop_count_match', 'N/A')}</td>
+                <td class="status-{drop_data.get('B', {}).get('drop_count_match', 'fail').lower()}">{drop_data.get('B', {}).get('drop_count_match', 'N/A')}</td>
+            </tr>
+            <tr>
+                <td>Indicator Accuracy</td>
+                <td class="status-{drop_data.get('A', {}).get('indicator_accuracy', 'fail').lower()}">{drop_data.get('A', {}).get('indicator_accuracy', 'N/A')}</td>
+                <td class="status-{drop_data.get('B', {}).get('indicator_accuracy', 'fail').lower()}">{drop_data.get('B', {}).get('indicator_accuracy', 'N/A')}</td>
+            </tr>
         </table>
     </div>
-    
-    <div class="section">
+
+    <div class="card">
         <h2>4. Start Timecode Validation</h2>
         <table>
             <tr>
-                <th>Camera</th>
-                <th>Status</th>
-                <th>OCR Frame 0</th>
-                <th>Metadata Start TC</th>
+                <th>Metric</th>
+                <th>Camera A</th>
+                <th>Camera B</th>
             </tr>
-'''
-        
-        for cam_id in ['A', 'B']:
-            cam_data = start_tc.get(cam_id, {})
-            html += f'''
             <tr>
-                <td>Camera {cam_id}</td>
-                <td><span class="status-badge {status_class(cam_data.get('status'))}">{cam_data.get('status', 'N/A')}</span></td>
-                <td>{cam_data.get('ocr_frame0_tc', 'N/A')}</td>
-                <td>{cam_data.get('metadata_start_tc', 'N/A')}</td>
+                <td>Status</td>
+                <td class="status-{start_tc.get('A', {}).get('status', 'fail').lower()}">{start_tc.get('A', {}).get('status', 'N/A')}</td>
+                <td class="status-{start_tc.get('B', {}).get('status', 'fail').lower()}">{start_tc.get('B', {}).get('status', 'N/A')}</td>
             </tr>
-'''
-        
-        html += '''
+            <tr>
+                <td>OCR Frame 0</td>
+                <td>{start_tc.get('A', {}).get('ocr_frame0_tc', 'N/A')}</td>
+                <td>{start_tc.get('B', {}).get('ocr_frame0_tc', 'N/A')}</td>
+            </tr>
+            <tr>
+                <td>Metadata</td>
+                <td>{start_tc.get('A', {}).get('metadata_start_tc', 'N/A')}</td>
+                <td>{start_tc.get('B', {}).get('metadata_start_tc', 'N/A')}</td>
+            </tr>
         </table>
     </div>
-    
-    <div class="section">
-        <h2>5. Indicator Health Summary</h2>
-'''
-        
-        for cam_id, analyser in [('A', self.analyser_a), ('B', self.analyser_b)]:
-            fn = analyser.stats['false_negatives']
-            fp = analyser.stats['false_positives']
-            
-            if fn == 0 and fp == 0:
-                health_status = 'pass'
-                health_text = 'All drop indicators correctly reported'
-            else:
-                health_status = 'fail'
-                health_text = f'False Negatives: {fn}, False Positives: {fp}'
-            
-            html += f'''
-        <p><strong>Camera {cam_id}:</strong> 
-            <span class="status-badge {health_status}">{health_text}</span>
-        </p>
-'''
-        
-        # Overall result
-        all_pass = all([
-            sync.get('status') == 'PASS',
-            all(c.get('status') == 'PASS' for c in corruption.values()),
-            all(d.get('drop_count_match') == 'PASS' for d in drop_data.values()),
-            all(d.get('indicator_accuracy') == 'PASS' for d in drop_data.values()),
-            all(s.get('status') == 'PASS' for s in start_tc.values())
-        ])
-        
-        overall_class = 'overall-pass' if all_pass else 'overall-fail'
-        overall_text = 'VALIDATION PASSED' if all_pass else 'VALIDATION FAILED'
-        
-        html += f'''
-    </div>
-    
-    <div class="overall-result {overall_class}">
-        <strong>{overall_text}</strong>
-    </div>
 </body>
-</html>
-'''
-        
+</html>'''
+
         return html
-    
-    def _generate_json_report(self, output_path: Path):
-        """Generate machine-readable JSON report"""
-        report = {
-            'generated_at': datetime.now().isoformat(),
-            'validation_results': self.validation_results,
-            'camera_a_stats': self.analyser_a.stats,
-            'camera_b_stats': self.analyser_b.stats,
-            'camera_a_metadata': {
-                'filename': self.analyser_a.metadata.filename if self.analyser_a.metadata else None,
-                'num_frames': self.analyser_a.metadata.num_frames if self.analyser_a.metadata else None,
-                'frame_rate': self.analyser_a.metadata.frame_rate if self.analyser_a.metadata else None,
-                'dropped_frames': self.analyser_a.metadata.dropped_frames if self.analyser_a.metadata else None,
-                'start_timecode': str(self.analyser_a.metadata.start_timecode) if self.analyser_a.metadata else None
-            },
-            'camera_b_metadata': {
-                'filename': self.analyser_b.metadata.filename if self.analyser_b.metadata else None,
-                'num_frames': self.analyser_b.metadata.num_frames if self.analyser_b.metadata else None,
-                'frame_rate': self.analyser_b.metadata.frame_rate if self.analyser_b.metadata else None,
-                'dropped_frames': self.analyser_b.metadata.dropped_frames if self.analyser_b.metadata else None,
-                'start_timecode': str(self.analyser_b.metadata.start_timecode) if self.analyser_b.metadata else None
-            }
-        }
-        
-        with open(output_path, 'w') as f:
-            json.dump(report, f, indent=2)
-    
-    def _generate_frame_csv(self, analyser: VideoAnalyser, output_path: Path):
-        """Generate detailed CSV of frame-by-frame analysis"""
-        rows = []
-        for result in analyser.results:
-            rows.append({
-                'frame_number': result.frame_number,
-                'visual_timecode': str(result.visual_timecode) if result.visual_timecode else '',
-                'visual_timecode_raw': result.visual_timecode_raw,
-                'drop_indicator': result.drop_indicator_present,
-                'is_duplicate': result.is_physical_duplicate,
-                'status': result.status.name,
-                'image_hash': result.image_hash,
-                'notes': result.notes
-            })
-        
-        df = pd.DataFrame(rows)
-        df.to_csv(output_path, index=False)
+
+
+# =============================================================================
+# Logging Setup
+# =============================================================================
+
+def setup_logging(verbose: bool = False):
+    """Configure logging for the application"""
+    level = logging.DEBUG if verbose else logging.INFO
+
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
 
 
 # =============================================================================
 # Main Entry Point
 # =============================================================================
 
-def setup_logging(verbose: bool = False):
-    """Configure logging"""
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler('video_qa.log')
-        ]
-    )
-
-
 def main():
-    """Main entry point for the QA application"""
+    """Main entry point for command-line usage"""
     import argparse
-    
+
     parser = argparse.ArgumentParser(
-        description='Video QA Automation for Hardware Validation'
+        description='Video QA Validation - Process dual-camera recordings',
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
+
     parser.add_argument('--video-a', '-va', required=True, help='Path to Camera A video file')
     parser.add_argument('--video-b', '-vb', required=True, help='Path to Camera B video file')
     parser.add_argument('--metadata-a', '-ma', required=True, help='Path to Camera A metadata JSON')
     parser.add_argument('--metadata-b', '-mb', required=True, help='Path to Camera B metadata JSON')
     parser.add_argument('--output', '-o', default='qa_reports', help='Output directory for reports')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
-    parser.add_argument('--debug', '-d', action='store_true', help='Save debug frames')
-    
+    parser.add_argument('--debug', '-d', action='store_true', help='Enable debug mode')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose logging')
+
     args = parser.parse_args()
-    
-    # Setup
+
+    setup_logging(args.verbose)
+
     global DEBUG
     DEBUG = args.debug
-    setup_logging(args.verbose)
-    
-    logger = logging.getLogger('main')
-    logger.info("Video QA Automation Starting...")
-    
-    # Create validator
+
     validator = DualCameraValidator(
         video_a=Path(args.video_a),
         video_b=Path(args.video_b),
@@ -2207,26 +2404,19 @@ def main():
         metadata_b=Path(args.metadata_b),
         output_dir=Path(args.output)
     )
-    
-    # Progress callback
-    def progress(current, total):
-        pct = (current / total) * 100
-        logger.info(f"Progress: {current}/{total} ({pct:.1f}%)")
-    
-    # Run validation
-    success = validator.run_full_validation(progress_callback=progress)
-    
+
+    success = validator.run_full_validation()
+
     if success:
         text_path, html_path = validator.generate_report()
-        logger.info(f"Text report: {text_path}")
-        logger.info(f"HTML report: {html_path}")
-        logger.info("Validation complete!")
+        print(f"\nReports generated:")
+        print(f"  Text: {text_path}")
+        print(f"  HTML: {html_path}")
+        return 0
     else:
-        logger.error("Validation failed!")
+        print("\nValidation failed!")
         return 1
-    
-    return 0
 
 
 if __name__ == '__main__':
-    exit(main())
+    sys.exit(main())
