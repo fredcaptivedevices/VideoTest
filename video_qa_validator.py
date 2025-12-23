@@ -604,15 +604,6 @@ class LEDTimecodeOCR:
                         best_conf = conf
                         best_method = f"easyocr_{name}_s{scale}"
 
-                # Only try Tesseract if EasyOCR didn't find anything
-                if not best_tc and TESSERACT_AVAILABLE:
-                    tc, raw, conf = self.ocr_with_tesseract(img, scale)
-                    if tc and conf > best_conf:
-                        best_tc = tc
-                        best_raw = raw
-                        best_conf = conf
-                        best_method = f"tesseract_{name}_s{scale}"
-
                 # Early exit if we get a high-confidence result
                 if best_conf > 80:
                     break
