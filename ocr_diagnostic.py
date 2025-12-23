@@ -23,15 +23,7 @@ from typing import Optional, Dict, Tuple, List
 from datetime import datetime
 import argparse
 
-# Try to import OCR engines
-try:
-    import pytesseract
-    TESSERACT_AVAILABLE = True
-    print(f"[✓] Tesseract available")
-except ImportError:
-    TESSERACT_AVAILABLE = False
-    print(f"[✗] Tesseract NOT available")
-
+# Try to import OCR engine
 try:
     import easyocr
     EASYOCR_AVAILABLE = True
@@ -203,54 +195,6 @@ def preprocess_strategies(gray: np.ndarray) -> List[Tuple[str, np.ndarray]]:
         results.append((f'bilateral_t{thresh_val}', closed))
 
     return results
-
-
-def ocr_tesseract(img: np.ndarray, scale: float = 2.0) -> Tuple[str, float]:
-    """Run Tesseract OCR"""
-    if not TESSERACT_AVAILABLE:
-        return "", 0.0
-
-    try:
-        if scale != 1.0:
-            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-
-        # Multiple PSM modes to try
-        configs = [
-            '--psm 7 -c tessedit_char_whitelist=0123456789:',  # Single line
-            '--psm 8 -c tessedit_char_whitelist=0123456789:',  # Single word
-            '--psm 13 -c tessedit_char_whitelist=0123456789:', # Raw line
-            '--psm 6 -c tessedit_char_whitelist=0123456789:',  # Single block
-        ]
-
-        best_text = ""
-        best_conf = 0.0
-
-        for config in configs:
-            try:
-                data = pytesseract.image_to_data(img, config=config, output_type=pytesseract.Output.DICT)
-
-                texts = []
-                confidences = []
-                for i, text in enumerate(data['text']):
-                    text = text.strip()
-                    conf = data['conf'][i]
-                    if text and conf > 0:
-                        texts.append(text)
-                        confidences.append(conf)
-
-                if texts:
-                    combined = ''.join(texts)
-                    avg_conf = sum(confidences) / len(confidences)
-
-                    if avg_conf > best_conf:
-                        best_conf = avg_conf
-                        best_text = combined
-            except:
-                pass
-
-        return best_text, best_conf
-    except Exception as e:
-        return f"Error: {e}", 0.0
 
 
 def ocr_easyocr(img: np.ndarray, scale: float = 2.0) -> Tuple[str, float]:
@@ -428,21 +372,6 @@ def run_diagnostic(video_path: Path, frame_num: int, roi: Optional[Dict[str, int
 
     for name, img in preprocessed:
         for scale in [2.0, 3.0]:
-            # Tesseract
-            if TESSERACT_AVAILABLE:
-                text, conf = ocr_tesseract(img, scale)
-                parsed = parse_timecode(text)
-                results.append({
-                    'method': 'tesseract',
-                    'preprocess': name,
-                    'scale': scale,
-                    'raw': text,
-                    'parsed': parsed,
-                    'confidence': conf,
-                    'valid': parsed is not None,
-                    'correct': parsed == expected_tc if expected_tc else None
-                })
-
             # EasyOCR
             if EASYOCR_AVAILABLE:
                 text, conf = ocr_easyocr(img, scale)

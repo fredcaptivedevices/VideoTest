@@ -29,7 +29,6 @@ from video_qa_validator import (
     DualCameraValidator,
     LEDTimecodeOCR,
     setup_logging,
-    TESSERACT_AVAILABLE,
     EASYOCR_AVAILABLE
 )
 
@@ -139,10 +138,10 @@ class TestOCRPipeline:
     """Tests for the enhanced OCR pipeline"""
 
     def test_ocr_engines_available(self):
-        """Test that at least one OCR engine is available"""
-        assert TESSERACT_AVAILABLE or EASYOCR_AVAILABLE, \
-            "At least one OCR engine must be available"
-        print(f"✓ OCR engines - Tesseract: {TESSERACT_AVAILABLE}, EasyOCR: {EASYOCR_AVAILABLE}")
+        """Test that EasyOCR is available"""
+        assert EASYOCR_AVAILABLE, \
+            "EasyOCR must be available"
+        print(f"✓ OCR engine - EasyOCR: {EASYOCR_AVAILABLE}")
 
     def test_preprocessing_generates_images(self):
         """Test that preprocessing generates multiple image variants"""
@@ -615,8 +614,7 @@ def main():
     print("=" * 70)
     print("VIDEO QA AUTOMATION - TEST SUITE v2.0")
     print("=" * 70)
-    print(f"\nOCR Engines Available:")
-    print(f"  Tesseract: {'Yes' if TESSERACT_AVAILABLE else 'No'}")
+    print(f"\nOCR Engine Available:")
     print(f"  EasyOCR: {'Yes' if EASYOCR_AVAILABLE else 'No'}")
 
     setup_logging(verbose=False)
