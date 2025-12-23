@@ -8,9 +8,7 @@ unit tests for the core logic components.
 """
 
 import sys
-import os
 import json
-import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
