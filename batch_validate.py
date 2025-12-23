@@ -236,24 +236,24 @@ class BatchValidator:
         return result
     
     def _find_roi_config(self, take_path: Path) -> Optional[Dict[str, int]]:
-        """Look for roi_config.json in take folder or parent folders"""
-        search_paths = [
-            take_path / 'roi_config.json',
-            take_path.parent / 'roi_config.json',
-            take_path.parent.parent / 'roi_config.json',
-        ]
-        
-        for config_path in search_paths:
-            if config_path.exists():
-                try:
-                    with open(config_path, 'r') as f:
-                        config = json.load(f)
-                    roi = config.get('timecode_roi')
-                    if roi:
-                        return roi
-                except Exception:
-                    pass
-        
+        """
+        Look for roi_config.json in take folder ONLY.
+
+        NOTE: We no longer search parent folders because the slate
+        can move between takes, requiring per-take calibration.
+        """
+        config_path = take_path / 'roi_config.json'
+
+        if config_path.exists():
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                roi = config.get('timecode_roi')
+                if roi:
+                    return roi
+            except Exception:
+                pass
+
         return None
     
     def _check_overall_pass(self, validation_results: Dict) -> bool:
@@ -278,38 +278,45 @@ class BatchValidator:
         """Discover and validate all takes in the data directory"""
         takes = self.discovery.find_all_takes()
         total_takes = len(takes)
-        
+
         if total_takes == 0:
             print(f"\nNo takes found in {self.data_dir}")
             return []
-        
+
         print(f"\n{'='*60}")
         print(f"Found {total_takes} takes to process")
         print(f"{'='*60}")
-        
-        # Group takes by shot (parent folder)
+
+        # Group takes by shot (parent folder) for display purposes
         shots = {}
         for take_path in takes:
             shot_name = take_path.parent.name
             if shot_name not in shots:
                 shots[shot_name] = []
             shots[shot_name].append(take_path)
-        
+
         print(f"Organised into {len(shots)} shots")
-        
+        print(f"\nNOTE: ROI calibration is required for EACH TAKE (slate may move between takes)")
+
         # Process each shot
         for shot_name, shot_takes in shots.items():
             print(f"\n{'='*60}")
             print(f"SHOT: {shot_name} ({len(shot_takes)} takes)")
             print(f"{'='*60}")
-            
-            # Check/create ROI config for this shot using first take
-            shot_folder = shot_takes[0].parent
-            roi_config = self._ensure_roi_config_for_shot(shot_folder, shot_takes[0])
-            
-            if roi_config is None:
-                print(f"\n  Skipping shot {shot_name} - calibration cancelled")
-                for take_path in shot_takes:
+
+            # Process all takes in this shot - each requires its own ROI calibration
+            for i, take_path in enumerate(shot_takes, 1):
+                rel_path = take_path.relative_to(self.data_dir)
+
+                print(f"\n{'─'*60}")
+                print(f"[{i}/{len(shot_takes)}] {rel_path}")
+                print(f"{'─'*60}")
+
+                # Check/create ROI config for THIS specific take
+                roi_config = self._ensure_roi_config_for_take(take_path)
+
+                if roi_config is None:
+                    print(f"\n  Skipping take {take_path.name} - calibration cancelled")
                     self.results.append({
                         'take_name': take_path.name,
                         'take_path': str(take_path),
@@ -317,16 +324,8 @@ class BatchValidator:
                         'error': 'ROI calibration cancelled',
                         'overall_pass': False
                     })
-                continue
-            
-            # Process all takes in this shot
-            for i, take_path in enumerate(shot_takes, 1):
-                rel_path = take_path.relative_to(self.data_dir)
-                
-                print(f"\n{'─'*60}")
-                print(f"[{i}/{len(shot_takes)}] {rel_path}")
-                print(f"{'─'*60}")
-                
+                    continue
+
                 result = self.validate_single_take(take_path, debug=debug, roi_config=roi_config)
                 if result:
                     self.results.append(result)
@@ -339,61 +338,89 @@ class BatchValidator:
         
         return self.results
     
-    def _ensure_roi_config_for_shot(self, shot_folder: Path, first_take: Path) -> Optional[Dict]:
+    def _ensure_roi_config_for_take(self, take_path: Path) -> Optional[Dict]:
         """
-        Open calibration GUI for BOTH cameras in each shot.
-        Each camera may have different framing, so we need separate ROIs.
-        
+        Ensure ROI configuration exists for a specific take.
+
+        Each take requires its own ROI calibration because the slate
+        can move between takes. If no ROI config exists for this take,
+        opens the calibration GUI for BOTH cameras.
+
         Returns dict with 'roi_a' and 'roi_b' keys, or None if cancelled.
         """
-        print(f"\n  Opening calibration tool for BOTH cameras...")
+        # Check if ROI config already exists for this take
+        config_path = take_path / 'roi_config.json'
+        if config_path.exists():
+            try:
+                with open(config_path, 'r') as f:
+                    existing_config = json.load(f)
+
+                # Check if it has the new format with separate camera ROIs
+                if 'roi_a' in existing_config and 'roi_b' in existing_config:
+                    print(f"  ✓ Using existing ROI config for this take")
+                    return existing_config
+
+                # Convert legacy format
+                if 'timecode_roi' in existing_config:
+                    legacy_roi = existing_config['timecode_roi']
+                    print(f"  ✓ Using existing ROI config (legacy format)")
+                    return {
+                        'roi_a': legacy_roi,
+                        'roi_b': legacy_roi,
+                        'version': '1.0-legacy'
+                    }
+            except Exception as e:
+                self.logger.warning(f"Error loading existing ROI config: {e}")
+
+        # No existing config - need to calibrate
+        print(f"\n  No ROI config found for this take - calibration required")
+        print(f"  → The slate may have moved, so each take needs its own ROI")
         print(f"  → Draw a box around the TIMECODE DISPLAY")
-        print(f"  → Press ENTER to confirm, ESC to skip this shot")
-        
+        print(f"  → Press ENTER to confirm, ESC to skip this take")
+
         # Find video files
-        files = self.discovery.get_take_files(first_take)
+        files = self.discovery.get_take_files(take_path)
         if not files:
             print(f"  Error: Could not find video files")
             return None
-        
+
         try:
-            from calibrate_roi import calibrate_from_video, save_roi_config
-            
+            from calibrate_roi import calibrate_from_video
+
             # Calibrate Camera A (left)
             print(f"\n  --- CAMERA A (left) ---")
             video_a = files['video_a']
             roi_a = calibrate_from_video(video_a)
-            
+
             if roi_a is None:
                 print(f"\n  ✗ Camera A calibration cancelled")
                 return None
-            
+
             # Calibrate Camera B (right)
             print(f"\n  --- CAMERA B (right) ---")
             video_b = files['video_b']
             roi_b = calibrate_from_video(video_b)
-            
+
             if roi_b is None:
                 print(f"\n  ✗ Camera B calibration cancelled")
                 return None
-            
+
             # Create combined config
             combined_config = {
                 'roi_a': roi_a,
                 'roi_b': roi_b,
                 'version': '2.0',
-                'note': 'Separate ROI for each camera'
+                'note': 'Per-take ROI calibration (slate may move between takes)'
             }
-            
-            # Save to shot folder
-            config_path = shot_folder / 'roi_config.json'
+
+            # Save to take folder ONLY (not to parent/shot folder)
             with open(config_path, 'w') as f:
                 json.dump(combined_config, f, indent=2)
-            
-            print(f"\n  ✓ Both cameras configured")
+
+            print(f"\n  ✓ Both cameras configured for this take")
             print(f"  ✓ Config saved to {config_path}")
             return combined_config
-                
+
         except ImportError as e:
             print(f"  Error: Could not import calibrate_roi module: {e}")
             print(f"  Make sure calibrate_roi.py is in the same directory")
