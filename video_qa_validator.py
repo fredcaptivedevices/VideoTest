@@ -10,10 +10,8 @@ Version: 2.0.0 - Dramatically improved OCR pipeline
 
 import cv2
 import numpy as np
-import pandas as pd
 import json
 import re
-import os
 import sys
 import logging
 from dataclasses import dataclass, field
@@ -21,7 +19,6 @@ from typing import Optional, Tuple, List, Dict, Any
 from pathlib import Path
 from datetime import datetime
 from enum import Enum, auto
-from collections import defaultdict
 
 # Try to import OCR engines
 try:
@@ -47,7 +44,7 @@ DEBUG = True  # Set to True to save screenshots of flagged frames
 DEBUG_OUTPUT_DIR = Path("debug_frames")
 
 # Debug: Save OCR input images for troubleshooting
-DEBUG_OCR = True  # Set to True to save OCR debug images
+DEBUG_OCR = False  # Set to True to save OCR debug images (SLOW - disk I/O)
 DEBUG_OCR_DIR = Path("debug_ocr")
 DEBUG_OCR_SAVE_ALL = False  # Set True to save ALL frames, False for first N only
 DEBUG_OCR_FIRST_N = 20  # Save debug images for first N frames
@@ -102,11 +99,6 @@ ROI_DROP = {
     'height': 60
 }
 
-# Debug: Save OCR input images for troubleshooting
-DEBUG_OCR = False  # Set to True to save OCR debug images (SLOW - disk I/O)
-DEBUG_OCR_DIR = Path("debug_ocr")
-
-# Timecode pattern for OCR validation
 # Timecode patterns for OCR validation
 # Standard: HH:MM:SS:FF with colons
 TIMECODE_PATTERN = re.compile(r'(\d{1,2}):(\d{2}):(\d{2}):(\d{2})')
@@ -1304,10 +1296,6 @@ class FrameReader:
         except Exception as e:
             self.logger.debug(f"EasyOCR error: {e}")
             return None, ""
-    
-        # Use enhanced OCR pipeline
-        tc, raw, _ = self.ocr_pipeline.extract_timecode(roi)
-        return tc, raw
 
     def compute_frame_hash(self, frame: np.ndarray) -> str:
         """Compute perceptual hash for frame comparison."""
@@ -1345,78 +1333,6 @@ class FrameReader:
             self._consecutive_same_tc = 1
 
         return self._consecutive_same_tc > self.frame_rate_multiplier
-
-    def frames_are_duplicate(self, frame1: np.ndarray, frame2: np.ndarray) -> bool:
-        """Check if two frames are visual duplicates."""
-        if not self.roi_timecode:
-            size = (64, 64)
-            small1 = cv2.resize(cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY), size, interpolation=cv2.INTER_AREA)
-            small2 = cv2.resize(cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY), size, interpolation=cv2.INTER_AREA)
-            mse = np.mean((small1.astype(float) - small2.astype(float)) ** 2)
-            return mse < DUPLICATE_MSE_THRESHOLD
-
-        roi = self.roi_timecode
-        tc1 = frame1[roi['y']:roi['y']+roi['height'], roi['x']:roi['x']+roi['width']]
-        tc2 = frame2[roi['y']:roi['y']+roi['height'], roi['x']:roi['x']+roi['width']]
-
-        gray1 = cv2.cvtColor(tc1, cv2.COLOR_BGR2GRAY)
-        gray2 = cv2.cvtColor(tc2, cv2.COLOR_BGR2GRAY)
-
-        size = (128, 32)
-        small1 = cv2.resize(gray1, size, interpolation=cv2.INTER_AREA)
-        small2 = cv2.resize(gray2, size, interpolation=cv2.INTER_AREA)
-
-        mse = np.mean((small1.astype(float) - small2.astype(float)) ** 2)
-        return mse < DUPLICATE_MSE_THRESHOLD
-
-    def frames_are_duplicate_fast(self, current_frame: np.ndarray) -> bool:
-        """Fast duplicate check using image comparison (legacy fallback)."""
-        if not self.roi_timecode:
-            size = (64, 64)
-            small_current = cv2.resize(
-                cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY),
-                size,
-                interpolation=cv2.INTER_AREA
-            )
-
-            if self._prev_frame_small is None:
-                self._prev_frame_small = small_current
-                self._consecutive_duplicates = 0
-                return False
-
-            mse = np.mean((small_current.astype(float) - self._prev_frame_small.astype(float)) ** 2)
-            is_same = mse < DUPLICATE_MSE_THRESHOLD
-
-            if is_same:
-                self._consecutive_duplicates += 1
-            else:
-                self._consecutive_duplicates = 0
-                self._prev_frame_small = small_current
-
-            return self._consecutive_duplicates >= self.frame_rate_multiplier
-
-        roi = self.roi_timecode
-        tc_region = current_frame[roi['y']:roi['y']+roi['height'], roi['x']:roi['x']+roi['width']]
-        gray = cv2.cvtColor(tc_region, cv2.COLOR_BGR2GRAY)
-
-        size = (128, 32)
-        small_current = cv2.resize(gray, size, interpolation=cv2.INTER_AREA)
-
-        if self._prev_frame_small is None:
-            self._prev_frame_small = small_current
-            self._consecutive_duplicates = 0
-            return False
-
-        mse = np.mean((small_current.astype(float) - self._prev_frame_small.astype(float)) ** 2)
-        is_same = mse < DUPLICATE_MSE_THRESHOLD
-
-        if is_same:
-            self._consecutive_duplicates += 1
-        else:
-            self._consecutive_duplicates = 0
-            self._prev_frame_small = small_current
-
-        return self._consecutive_duplicates >= self.frame_rate_multiplier
 
 
 # =============================================================================
@@ -1801,17 +1717,6 @@ class VideoAnalyser:
                     return Timecode.from_frame_number(total_frames, fps)
                 else:
                     return tc
-
-        return None
-
-    def get_first_valid_timecode(self) -> Optional[Tuple[int, Timecode]]:
-        """Get the first valid timecode and its frame number."""
-        if not self.results:
-            return None
-
-        for result in self.results:
-            if result.visual_timecode is not None:
-                return (result.frame_number, result.visual_timecode)
 
         return None
 

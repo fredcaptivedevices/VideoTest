@@ -17,7 +17,6 @@ import cv2
 import numpy as np
 import json
 import sys
-import os
 from pathlib import Path
 from typing import Optional, Dict, Tuple, List
 from datetime import datetime
