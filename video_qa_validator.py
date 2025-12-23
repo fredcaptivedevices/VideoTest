@@ -336,8 +336,10 @@ class LEDTimecodeOCR:
         """
         Generate preprocessed versions of the LED display ROI.
 
-        OPTIMIZED: Reduced from 28 to 6 strategies for better performance.
-        Method caching ensures subsequent frames use the best strategy first.
+        Optimized for LED dot-matrix displays:
+        1. Heavy blur to merge LED dots
+        2. High fixed threshold to isolate only bright LEDs
+        3. Always invert to black text on white background (OCR standard)
 
         Returns list of (name, preprocessed_image) tuples for OCR attempts.
         """
@@ -352,72 +354,68 @@ class LEDTimecodeOCR:
 
         results = []
 
-        # Check if this is a light-on-dark or dark-on-light display
-        mean_val = np.mean(gray)
-        max_val = np.max(gray)
-        is_light_on_dark = mean_val < 128
-
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        # Morphological kernel for closing gaps between merged dots
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
 
         # =====================================================================
-        # Strategy 1: Otsu's threshold (auto-level - usually best)
+        # Strategy 1: Heavy blur (21x21) + High threshold (200)
+        # Best for typical LED dot-matrix displays
         # =====================================================================
-        blurred = cv2.GaussianBlur(gray, (9, 9), 0)
-        _, otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        closed = cv2.morphologyEx(otsu, cv2.MORPH_CLOSE, kernel, iterations=2)
-        if is_light_on_dark:
-            closed = cv2.bitwise_not(closed)
-        results.append(('otsu', closed))
+        blurred_21 = cv2.GaussianBlur(gray, (21, 21), 0)
+        _, thresh_200 = cv2.threshold(blurred_21, 200, 255, cv2.THRESH_BINARY)
+        closed = cv2.morphologyEx(thresh_200, cv2.MORPH_CLOSE, kernel, iterations=2)
+        # ALWAYS invert: LED displays are light-on-dark, OCR needs dark-on-light
+        inverted = cv2.bitwise_not(closed)
+        results.append(('blur21_t200', inverted))
 
         # =====================================================================
-        # Strategy 2: Smart fixed threshold based on brightness
+        # Strategy 2: Heavy blur (25x25) + High threshold (200)
+        # For displays with larger dot spacing
         # =====================================================================
-        if max_val > 200:
-            thresh_val = 180
-        elif max_val > 150:
-            thresh_val = 150
-        else:
-            thresh_val = 120
-
-        _, thresh = cv2.threshold(blurred, thresh_val, 255, cv2.THRESH_BINARY)
-        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
-        if is_light_on_dark:
-            closed = cv2.bitwise_not(closed)
-        results.append((f'thresh_{thresh_val}', closed))
+        blurred_25 = cv2.GaussianBlur(gray, (25, 25), 0)
+        _, thresh_200_25 = cv2.threshold(blurred_25, 200, 255, cv2.THRESH_BINARY)
+        closed = cv2.morphologyEx(thresh_200_25, cv2.MORPH_CLOSE, kernel, iterations=2)
+        inverted = cv2.bitwise_not(closed)
+        results.append(('blur25_t200', inverted))
 
         # =====================================================================
-        # Strategy 3: Higher blur for very dotty displays
+        # Strategy 3: Heavy blur (21x21) + Lower threshold (180)
+        # For slightly dimmer displays
         # =====================================================================
-        blurred_heavy = cv2.GaussianBlur(gray, (15, 15), 0)
-        _, otsu_heavy = cv2.threshold(blurred_heavy, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        closed = cv2.morphologyEx(otsu_heavy, cv2.MORPH_CLOSE, kernel, iterations=2)
-        if is_light_on_dark:
-            closed = cv2.bitwise_not(closed)
-        results.append(('otsu_heavy', closed))
+        _, thresh_180 = cv2.threshold(blurred_21, 180, 255, cv2.THRESH_BINARY)
+        closed = cv2.morphologyEx(thresh_180, cv2.MORPH_CLOSE, kernel, iterations=2)
+        inverted = cv2.bitwise_not(closed)
+        results.append(('blur21_t180', inverted))
 
         # =====================================================================
-        # Strategy 4: CLAHE for low-contrast displays
+        # Strategy 4: Very heavy blur (31x31) + High threshold (200)
+        # For very dotty displays with wide spacing
         # =====================================================================
-        if mean_val < 100:  # Only use CLAHE for dim displays
-            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-            enhanced = clahe.apply(gray)
-            blurred_clahe = cv2.GaussianBlur(enhanced, (9, 9), 0)
-            _, thresh_clahe = cv2.threshold(blurred_clahe, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            closed = cv2.morphologyEx(thresh_clahe, cv2.MORPH_CLOSE, kernel, iterations=2)
-            if is_light_on_dark:
-                closed = cv2.bitwise_not(closed)
-            results.append(('clahe_otsu', closed))
+        blurred_31 = cv2.GaussianBlur(gray, (31, 31), 0)
+        _, thresh_200_31 = cv2.threshold(blurred_31, 200, 255, cv2.THRESH_BINARY)
+        closed = cv2.morphologyEx(thresh_200_31, cv2.MORPH_CLOSE, kernel, iterations=2)
+        inverted = cv2.bitwise_not(closed)
+        results.append(('blur31_t200', inverted))
 
         # =====================================================================
-        # Strategy 5: Morphological reconstruction for dot-matrix
+        # Strategy 5: Heavy blur + Morphological reconstruction
+        # Dilate then erode to fill gaps and smooth edges
         # =====================================================================
-        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-        dilated = cv2.dilate(otsu, kernel_dilate, iterations=2)
+        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        dilated = cv2.dilate(thresh_200, kernel_dilate, iterations=2)
         kernel_erode = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         eroded = cv2.erode(dilated, kernel_erode, iterations=1)
-        if is_light_on_dark:
-            eroded = cv2.bitwise_not(eroded)
-        results.append(('morph', eroded))
+        inverted = cv2.bitwise_not(eroded)
+        results.append(('blur21_t200_morph', inverted))
+
+        # =====================================================================
+        # Strategy 6: Aggressive threshold (220) for very bright displays
+        # Only keeps the brightest pixels
+        # =====================================================================
+        _, thresh_220 = cv2.threshold(blurred_21, 220, 255, cv2.THRESH_BINARY)
+        closed = cv2.morphologyEx(thresh_220, cv2.MORPH_CLOSE, kernel, iterations=2)
+        inverted = cv2.bitwise_not(closed)
+        results.append(('blur21_t220', inverted))
 
         return results
 
