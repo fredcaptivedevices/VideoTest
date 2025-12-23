@@ -23,20 +23,13 @@ from datetime import datetime
 from enum import Enum, auto
 from collections import defaultdict
 
-# Try to import OCR engines
-try:
-    import pytesseract
-    TESSERACT_AVAILABLE = True
-except ImportError:
-    TESSERACT_AVAILABLE = False
-    print("Warning: pytesseract not available, using EasyOCR only")
-
+# Try to import OCR engine
 try:
     import easyocr
     EASYOCR_AVAILABLE = True
 except ImportError:
     EASYOCR_AVAILABLE = False
-    print("Warning: EasyOCR not available, using Tesseract only")
+    print("Warning: EasyOCR not available")
 
 
 # =============================================================================
@@ -325,7 +318,7 @@ class LEDTimecodeOCR:
 
     Key features:
     - Multiple preprocessing strategies optimized for LED displays
-    - Dual OCR engine support (EasyOCR + Tesseract)
+    - EasyOCR engine support
     - Confidence-based result selection
     - Robust timecode pattern matching
     """
@@ -339,7 +332,6 @@ class LEDTimecodeOCR:
         self.stats = {
             'attempts': 0,
             'successes': 0,
-            'tesseract_wins': 0,
             'easyocr_wins': 0
         }
 
@@ -436,51 +428,6 @@ class LEDTimecodeOCR:
         results.append(('morph', eroded))
 
         return results
-
-    def ocr_with_tesseract(self, img: np.ndarray, scale: float = 2.0) -> Tuple[Optional[Timecode], str, float]:
-        """
-        Run Tesseract OCR on preprocessed image.
-
-        Returns (timecode, raw_text, confidence)
-        """
-        if not TESSERACT_AVAILABLE:
-            return None, "", 0.0
-
-        try:
-            # Scale up for better recognition
-            if scale != 1.0:
-                img_scaled = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-            else:
-                img_scaled = img
-
-            # Tesseract config for digits only
-            config = '--psm 7 -c tessedit_char_whitelist=0123456789:'
-
-            # Get text with confidence data
-            data = pytesseract.image_to_data(img_scaled, config=config, output_type=pytesseract.Output.DICT)
-
-            # Combine text and calculate average confidence
-            texts = []
-            confidences = []
-            for i, text in enumerate(data['text']):
-                text = text.strip()
-                conf = data['conf'][i]
-                if text and conf > 0:
-                    texts.append(text)
-                    confidences.append(conf)
-
-            raw_text = ''.join(texts)
-            avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
-
-            # Clean up and parse
-            raw_text = self._clean_ocr_text(raw_text)
-            tc = Timecode.from_string(raw_text)
-
-            return tc, raw_text, avg_conf
-
-        except Exception as e:
-            self.logger.debug(f"Tesseract error: {e}")
-            return None, "", 0.0
 
     def ocr_with_easyocr(self, img: np.ndarray, scale: float = 2.0) -> Tuple[Optional[Timecode], str, float]:
         """
@@ -620,9 +567,7 @@ class LEDTimecodeOCR:
             if cached_name in preprocessed_dict:
                 img = preprocessed_dict[cached_name]
 
-                if cached_engine == 'tesseract' and TESSERACT_AVAILABLE:
-                    tc, raw, conf = self.ocr_with_tesseract(img, cached_scale)
-                elif cached_engine == 'easyocr' and EASYOCR_AVAILABLE:
+                if cached_engine == 'easyocr' and EASYOCR_AVAILABLE:
                     tc, raw, conf = self.ocr_with_easyocr(img, cached_scale)
                 else:
                     continue
@@ -694,10 +639,7 @@ class LEDTimecodeOCR:
         # Update stats
         if best_tc:
             self.stats['successes'] += 1
-            if 'tesseract' in best_method:
-                self.stats['tesseract_wins'] += 1
-            else:
-                self.stats['easyocr_wins'] += 1
+            self.stats['easyocr_wins'] += 1
 
         return best_tc, best_raw, best_conf
 
@@ -845,18 +787,8 @@ class FrameReader:
         # Use OCR to detect "Dropped" or "DROP" text
         detected = False
 
-        # Try Tesseract first (faster for this use case)
-        if TESSERACT_AVAILABLE:
-            try:
-                ocr_config = '--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz '
-                text = pytesseract.image_to_string(thresh, config=ocr_config).strip().lower()
-                drop_keywords = ['drop', 'dropped', 'frame']
-                detected = any(keyword in text for keyword in drop_keywords)
-            except Exception:
-                pass
-
-        # Fallback to EasyOCR if needed
-        if not detected and EASYOCR_AVAILABLE:
+        # Use EasyOCR to detect drop indicator
+        if EASYOCR_AVAILABLE:
             try:
                 reader = get_ocr_reader()
                 if reader:
@@ -1399,8 +1331,8 @@ class VideoAnalyser:
         ocr_stats = self.reader.ocr_pipeline.stats
         success_rate = (ocr_stats['successes'] / ocr_stats['attempts'] * 100) if ocr_stats['attempts'] > 0 else 0
         self.logger.info(f"OCR Stats: {ocr_stats['successes']}/{ocr_stats['attempts']} ({success_rate:.1f}% success)")
-        if ocr_stats['tesseract_wins'] > 0 or ocr_stats['easyocr_wins'] > 0:
-            self.logger.info(f"  Tesseract wins: {ocr_stats['tesseract_wins']}, EasyOCR wins: {ocr_stats['easyocr_wins']}")
+        if ocr_stats['easyocr_wins'] > 0:
+            self.logger.info(f"  EasyOCR wins: {ocr_stats['easyocr_wins']}")
 
         return True
 
