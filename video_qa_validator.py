@@ -388,9 +388,11 @@ class LEDTimecodeOCR:
                 kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
                 closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-                # If light-on-dark, we have white digits - keep as is
-                # If dark-on-light, invert to get white digits
-                if not is_light_on_dark:
+                # For OCR, we need BLACK text on WHITE background (standard convention)
+                # After thresholding LED displays (light-on-dark): white digits on black
+                # After thresholding documents (dark-on-light): depends on threshold
+                # Always invert light-on-dark to get black text on white for OCR
+                if is_light_on_dark:
                     closed = cv2.bitwise_not(closed)
 
                 results.append((f'blur{blur_size}_t{thresh_val}', closed))
@@ -405,7 +407,8 @@ class LEDTimecodeOCR:
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
             closed = cv2.morphologyEx(otsu, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-            if not is_light_on_dark:
+            # For OCR: black text on white background
+            if is_light_on_dark:
                 closed = cv2.bitwise_not(closed)
 
             results.append((f'otsu_blur{blur_size}', closed))
@@ -428,7 +431,8 @@ class LEDTimecodeOCR:
                 kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
                 closed = cv2.morphologyEx(adaptive, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-                if not is_light_on_dark:
+                # For OCR: black text on white background
+                if is_light_on_dark:
                     closed = cv2.bitwise_not(closed)
 
                 results.append((f'adaptive_b{blur_size}_bs{block_size}', closed))
@@ -448,7 +452,8 @@ class LEDTimecodeOCR:
             kernel_erode = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
             eroded = cv2.erode(dilated, kernel_erode, iterations=1)
 
-            if not is_light_on_dark:
+            # For OCR: black text on white background
+            if is_light_on_dark:
                 eroded = cv2.bitwise_not(eroded)
 
             results.append((f'morph_t{thresh_val}', eroded))
@@ -465,7 +470,8 @@ class LEDTimecodeOCR:
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
             closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-            if not is_light_on_dark:
+            # For OCR: black text on white background
+            if is_light_on_dark:
                 closed = cv2.bitwise_not(closed)
 
             results.append((f'clahe_t{thresh_val}', closed))
@@ -1127,6 +1133,10 @@ class FrameReader:
 
         images_to_try = []
 
+        # Detect if this is light-on-dark (LED display) for inversion
+        # LED displays have white dots on dark background, so mean is low
+        is_light_on_dark = mean_brightness < 128
+
         # If we have a cached successful method, try it first
         if self._last_successful_thresh:
             thresh_val = self._last_successful_thresh
@@ -1135,6 +1145,9 @@ class FrameReader:
             else:
                 _, thresh = cv2.threshold(blurred, thresh_val, 255, cv2.THRESH_BINARY)
             thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+            # Invert LED displays to get black text on white (standard OCR format)
+            if is_light_on_dark:
+                thresh = cv2.bitwise_not(thresh)
             images_to_try.append((self._last_successful_thresh, thresh))
 
         # Smart threshold selection based on max brightness
@@ -1143,24 +1156,36 @@ class FrameReader:
             if self._last_successful_thresh != 200:
                 _, thresh = cv2.threshold(blurred, 200, 255, cv2.THRESH_BINARY)
                 thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+                # Invert LED displays to get black text on white (standard OCR format)
+                if is_light_on_dark:
+                    thresh = cv2.bitwise_not(thresh)
                 images_to_try.append((200, thresh))
         elif max_val > 150:
             # Medium brightness - use medium threshold
             if self._last_successful_thresh != 170:
                 _, thresh = cv2.threshold(blurred, 170, 255, cv2.THRESH_BINARY)
                 thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+                # Invert LED displays to get black text on white (standard OCR format)
+                if is_light_on_dark:
+                    thresh = cv2.bitwise_not(thresh)
                 images_to_try.append((170, thresh))
         else:
             # Dim LED - use OTSU auto-threshold
             if self._last_successful_thresh != 'otsu':
                 _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
                 thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+                # Invert LED displays to get black text on white (standard OCR format)
+                if is_light_on_dark:
+                    thresh = cv2.bitwise_not(thresh)
                 images_to_try.append(('otsu', thresh))
 
         # Fallback: add one additional method if primary fails
         if len(images_to_try) < 2:
             _, thresh = cv2.threshold(blurred, 150, 255, cv2.THRESH_BINARY)
             thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+            # Invert LED displays to get black text on white (standard OCR format)
+            if is_light_on_dark:
+                thresh = cv2.bitwise_not(thresh)
             images_to_try.append((150, thresh))
 
         # Try each preprocessed image with early exit

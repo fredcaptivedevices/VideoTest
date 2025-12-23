@@ -87,6 +87,8 @@ def extract_roi(frame: np.ndarray, roi: Dict[str, int]) -> np.ndarray:
 def preprocess_strategies(gray: np.ndarray) -> List[Tuple[str, np.ndarray]]:
     """
     Generate multiple preprocessed versions optimized for LED dot-matrix displays.
+
+    Output format: BLACK text on WHITE background (standard OCR convention).
     """
     results = []
 
@@ -107,7 +109,8 @@ def preprocess_strategies(gray: np.ndarray) -> List[Tuple[str, np.ndarray]]:
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
             closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-            if not is_light_on_dark:
+            # For OCR: black text on white background
+            if is_light_on_dark:
                 closed = cv2.bitwise_not(closed)
 
             results.append((f'blur{blur_size}_t{thresh_val}', closed))
@@ -122,7 +125,8 @@ def preprocess_strategies(gray: np.ndarray) -> List[Tuple[str, np.ndarray]]:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         closed = cv2.morphologyEx(otsu, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-        if not is_light_on_dark:
+        # For OCR: black text on white background
+        if is_light_on_dark:
             closed = cv2.bitwise_not(closed)
 
         results.append((f'otsu_blur{blur_size}', closed))
@@ -144,7 +148,8 @@ def preprocess_strategies(gray: np.ndarray) -> List[Tuple[str, np.ndarray]]:
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
             closed = cv2.morphologyEx(adaptive, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-            if not is_light_on_dark:
+            # For OCR: black text on white background
+            if is_light_on_dark:
                 closed = cv2.bitwise_not(closed)
 
             results.append((f'adaptive_b{blur_size}_bs{block_size}', closed))
@@ -165,7 +170,8 @@ def preprocess_strategies(gray: np.ndarray) -> List[Tuple[str, np.ndarray]]:
         kernel_erode = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         eroded = cv2.erode(dilated, kernel_erode, iterations=1)
 
-        if not is_light_on_dark:
+        # For OCR: black text on white background
+        if is_light_on_dark:
             eroded = cv2.bitwise_not(eroded)
 
         results.append((f'morph_t{thresh_val}', eroded))
@@ -182,7 +188,8 @@ def preprocess_strategies(gray: np.ndarray) -> List[Tuple[str, np.ndarray]]:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-        if not is_light_on_dark:
+        # For OCR: black text on white background
+        if is_light_on_dark:
             closed = cv2.bitwise_not(closed)
 
         results.append((f'clahe_t{thresh_val}', closed))
@@ -197,7 +204,8 @@ def preprocess_strategies(gray: np.ndarray) -> List[Tuple[str, np.ndarray]]:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-        if not is_light_on_dark:
+        # For OCR: black text on white background
+        if is_light_on_dark:
             closed = cv2.bitwise_not(closed)
 
         results.append((f'bilateral_t{thresh_val}', closed))
