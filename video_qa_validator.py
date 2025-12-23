@@ -350,12 +350,10 @@ class LEDTimecodeOCR:
 
     def preprocess_led_display(self, roi: np.ndarray) -> List[Tuple[str, np.ndarray]]:
         """
-        Generate multiple preprocessed versions of the LED display ROI.
+        Generate preprocessed versions of the LED display ROI.
 
-        LED dot-matrix displays require special handling:
-        1. Dots need to be fused into solid digit shapes
-        2. Background must be cleanly separated from foreground
-        3. Digit segments need to be connected properly
+        OPTIMIZED: Reduced from 28 to 6 strategies for better performance.
+        Method caching ensures subsequent frames use the best strategy first.
 
         Returns list of (name, preprocessed_image) tuples for OCR attempts.
         """
@@ -372,109 +370,70 @@ class LEDTimecodeOCR:
 
         # Check if this is a light-on-dark or dark-on-light display
         mean_val = np.mean(gray)
+        max_val = np.max(gray)
         is_light_on_dark = mean_val < 128
 
-        # =====================================================================
-        # Strategy 1: Heavy Gaussian blur to fuse LED dots
-        # =====================================================================
-        for blur_size in [9, 11, 15]:
-            blurred = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
-
-            # Multiple threshold levels
-            for thresh_val in [180, 160, 140, 200, 220]:
-                _, thresh = cv2.threshold(blurred, thresh_val, 255, cv2.THRESH_BINARY)
-
-                # Apply morphological closing to connect digit segments
-                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-                closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-                # For OCR, we need BLACK text on WHITE background (standard convention)
-                # After thresholding LED displays (light-on-dark): white digits on black
-                # After thresholding documents (dark-on-light): depends on threshold
-                # Always invert light-on-dark to get black text on white for OCR
-                if is_light_on_dark:
-                    closed = cv2.bitwise_not(closed)
-
-                results.append((f'blur{blur_size}_t{thresh_val}', closed))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
         # =====================================================================
-        # Strategy 2: Otsu's threshold (auto-level detection)
+        # Strategy 1: Otsu's threshold (auto-level - usually best)
         # =====================================================================
-        for blur_size in [7, 11]:
-            blurred = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
-            _, otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        blurred = cv2.GaussianBlur(gray, (9, 9), 0)
+        _, otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        closed = cv2.morphologyEx(otsu, cv2.MORPH_CLOSE, kernel, iterations=2)
+        if is_light_on_dark:
+            closed = cv2.bitwise_not(closed)
+        results.append(('otsu', closed))
 
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-            closed = cv2.morphologyEx(otsu, cv2.MORPH_CLOSE, kernel, iterations=2)
+        # =====================================================================
+        # Strategy 2: Smart fixed threshold based on brightness
+        # =====================================================================
+        if max_val > 200:
+            thresh_val = 180
+        elif max_val > 150:
+            thresh_val = 150
+        else:
+            thresh_val = 120
 
-            # For OCR: black text on white background
+        _, thresh = cv2.threshold(blurred, thresh_val, 255, cv2.THRESH_BINARY)
+        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+        if is_light_on_dark:
+            closed = cv2.bitwise_not(closed)
+        results.append((f'thresh_{thresh_val}', closed))
+
+        # =====================================================================
+        # Strategy 3: Higher blur for very dotty displays
+        # =====================================================================
+        blurred_heavy = cv2.GaussianBlur(gray, (15, 15), 0)
+        _, otsu_heavy = cv2.threshold(blurred_heavy, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        closed = cv2.morphologyEx(otsu_heavy, cv2.MORPH_CLOSE, kernel, iterations=2)
+        if is_light_on_dark:
+            closed = cv2.bitwise_not(closed)
+        results.append(('otsu_heavy', closed))
+
+        # =====================================================================
+        # Strategy 4: CLAHE for low-contrast displays
+        # =====================================================================
+        if mean_val < 100:  # Only use CLAHE for dim displays
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+            enhanced = clahe.apply(gray)
+            blurred_clahe = cv2.GaussianBlur(enhanced, (9, 9), 0)
+            _, thresh_clahe = cv2.threshold(blurred_clahe, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            closed = cv2.morphologyEx(thresh_clahe, cv2.MORPH_CLOSE, kernel, iterations=2)
             if is_light_on_dark:
                 closed = cv2.bitwise_not(closed)
-
-            results.append((f'otsu_blur{blur_size}', closed))
-
-        # =====================================================================
-        # Strategy 3: Adaptive threshold (handles uneven lighting)
-        # =====================================================================
-        for blur_size in [7, 11]:
-            blurred = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
-
-            # Adaptive threshold with different block sizes
-            for block_size in [31, 51, 71]:
-                adaptive = cv2.adaptiveThreshold(
-                    blurred, 255,
-                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                    cv2.THRESH_BINARY,
-                    block_size, -3
-                )
-
-                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-                closed = cv2.morphologyEx(adaptive, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-                # For OCR: black text on white background
-                if is_light_on_dark:
-                    closed = cv2.bitwise_not(closed)
-
-                results.append((f'adaptive_b{blur_size}_bs{block_size}', closed))
+            results.append(('clahe_otsu', closed))
 
         # =====================================================================
-        # Strategy 4: Morphological reconstruction for dot-matrix
+        # Strategy 5: Morphological reconstruction for dot-matrix
         # =====================================================================
-        blurred = cv2.GaussianBlur(gray, (11, 11), 0)
-
-        for thresh_val in [160, 180, 200]:
-            _, thresh = cv2.threshold(blurred, thresh_val, 255, cv2.THRESH_BINARY)
-
-            # Heavy dilation to connect dots, then erode to restore shape
-            kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-            dilated = cv2.dilate(thresh, kernel_dilate, iterations=2)
-
-            kernel_erode = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-            eroded = cv2.erode(dilated, kernel_erode, iterations=1)
-
-            # For OCR: black text on white background
-            if is_light_on_dark:
-                eroded = cv2.bitwise_not(eroded)
-
-            results.append((f'morph_t{thresh_val}', eroded))
-
-        # =====================================================================
-        # Strategy 5: CLAHE (Contrast Limited Adaptive Histogram Equalization)
-        # =====================================================================
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
-        blurred = cv2.GaussianBlur(enhanced, (9, 9), 0)
-
-        for thresh_val in [180, 200]:
-            _, thresh = cv2.threshold(blurred, thresh_val, 255, cv2.THRESH_BINARY)
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-            closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-            # For OCR: black text on white background
-            if is_light_on_dark:
-                closed = cv2.bitwise_not(closed)
-
-            results.append((f'clahe_t{thresh_val}', closed))
+        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        dilated = cv2.dilate(otsu, kernel_dilate, iterations=2)
+        kernel_erode = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        eroded = cv2.erode(dilated, kernel_erode, iterations=1)
+        if is_light_on_dark:
+            eroded = cv2.bitwise_not(eroded)
+        results.append(('morph', eroded))
 
         return results
 
@@ -525,7 +484,7 @@ class LEDTimecodeOCR:
 
     def ocr_with_easyocr(self, img: np.ndarray, scale: float = 2.0) -> Tuple[Optional[Timecode], str, float]:
         """
-        Run EasyOCR on preprocessed image with multiple configurations.
+        Run EasyOCR on preprocessed image with optimized single config.
 
         Returns (timecode, raw_text, confidence)
         """
@@ -546,100 +505,42 @@ class LEDTimecodeOCR:
             else:
                 img_for_ocr = img_scaled
 
-            # Multiple EasyOCR configurations to try (optimized for LED displays)
-            easyocr_configs = [
-                # Config 1: Standard with low thresholds
-                {
-                    'allowlist': '0123456789:',
-                    'paragraph': False,
-                    'detail': 1,
-                    'width_ths': 0.5,
-                    'height_ths': 0.5,
-                    'contrast_ths': 0.1,
-                    'adjust_contrast': 0.5
-                },
-                # Config 2: Lower text threshold for faint digits
-                {
-                    'allowlist': '0123456789:',
-                    'paragraph': False,
-                    'detail': 1,
-                    'text_threshold': 0.5,
-                    'low_text': 0.3,
-                    'link_threshold': 0.3,
-                },
-                # Config 3: Very permissive
-                {
-                    'allowlist': '0123456789:',
-                    'paragraph': False,
-                    'detail': 1,
-                    'width_ths': 0.3,
-                    'height_ths': 0.3,
-                    'text_threshold': 0.4,
-                    'low_text': 0.2,
-                },
-                # Config 4: Paragraph mode (better for connected text)
-                {
-                    'allowlist': '0123456789:',
-                    'paragraph': True,
-                    'detail': 1,
-                    'width_ths': 0.7,
-                },
-                # Config 5: High magnification for small text
-                {
-                    'allowlist': '0123456789:',
-                    'paragraph': False,
-                    'detail': 1,
-                    'mag_ratio': 2.0,
-                    'text_threshold': 0.6,
-                },
-            ]
+            # Single optimized config for LED displays (much faster than 5 configs)
+            results = reader.readtext(
+                img_for_ocr,
+                allowlist='0123456789:;.',
+                paragraph=False,
+                detail=1,
+                width_ths=0.5,
+                height_ths=0.5,
+                low_text=0.3,
+            )
 
-            best_tc = None
-            best_raw = ""
-            best_conf = 0.0
+            if not results:
+                return None, "", 0.0
 
-            for config in easyocr_configs:
-                try:
-                    results = reader.readtext(img_for_ocr, **config)
+            # Sort by x-position and combine
+            sorted_results = sorted(results, key=lambda r: r[0][0][0])
 
-                    if not results:
-                        continue
+            texts = []
+            confidences = []
+            for (bbox, text, conf) in sorted_results:
+                text = text.strip()
+                if text:
+                    texts.append(text)
+                    confidences.append(conf)
 
-                    # Sort by x-position and combine
-                    sorted_results = sorted(results, key=lambda r: r[0][0][0])
+            if not texts:
+                return None, "", 0.0
 
-                    texts = []
-                    confidences = []
-                    for (bbox, text, conf) in sorted_results:
-                        text = text.strip()
-                        if text:
-                            texts.append(text)
-                            confidences.append(conf)
+            raw_text = ''.join(texts)
+            avg_conf = sum(confidences) / len(confidences) * 100
 
-                    if not texts:
-                        continue
+            # Clean and try to parse
+            cleaned = self._clean_ocr_text(raw_text)
+            tc = Timecode.from_string(cleaned)
 
-                    raw_text = ''.join(texts)
-                    avg_conf = sum(confidences) / len(confidences) * 100
-
-                    # Clean and try to parse
-                    cleaned = self._clean_ocr_text(raw_text)
-                    tc = Timecode.from_string(cleaned)
-
-                    # If valid timecode and better confidence, keep it
-                    if tc and avg_conf > best_conf:
-                        best_tc = tc
-                        best_raw = cleaned
-                        best_conf = avg_conf
-
-                    # Early exit on high confidence valid result
-                    if best_tc and best_conf > 85:
-                        break
-
-                except Exception:
-                    continue
-
-            return best_tc, best_raw, best_conf
+            return tc, cleaned, avg_conf
 
         except Exception as e:
             self.logger.debug(f"EasyOCR error: {e}")
@@ -737,31 +638,35 @@ class LEDTimecodeOCR:
                     break
 
         # PHASE 2: Full search if cached methods didn't work well
+        # OPTIMIZED: Reduced scales from [2.0, 3.0, 2.5] to [2.0] for speed
         if not best_tc or best_conf < 70:
             for name, img in preprocessed_images:
                 # Skip methods we already tried from cache
                 already_tried = any(
                     name == cn for cn, _, _ in self._successful_methods
                 )
+                if already_tried:
+                    continue
 
-                for scale in [2.0, 3.0, 2.5]:
-                    # Try Tesseract
-                    if TESSERACT_AVAILABLE:
-                        tc, raw, conf = self.ocr_with_tesseract(img, scale)
-                        if tc and conf > best_conf:
-                            best_tc = tc
-                            best_raw = raw
-                            best_conf = conf
-                            best_method = f"tesseract_{name}_s{scale}"
+                scale = 2.0  # Single scale for speed (method caching handles optimization)
 
-                    # Try EasyOCR
-                    if EASYOCR_AVAILABLE:
-                        tc, raw, conf = self.ocr_with_easyocr(img, scale)
-                        if tc and conf > best_conf:
-                            best_tc = tc
-                            best_raw = raw
-                            best_conf = conf
-                            best_method = f"easyocr_{name}_s{scale}"
+                # Try EasyOCR first (usually better for LED displays)
+                if EASYOCR_AVAILABLE:
+                    tc, raw, conf = self.ocr_with_easyocr(img, scale)
+                    if tc and conf > best_conf:
+                        best_tc = tc
+                        best_raw = raw
+                        best_conf = conf
+                        best_method = f"easyocr_{name}_s{scale}"
+
+                # Only try Tesseract if EasyOCR didn't find anything
+                if not best_tc and TESSERACT_AVAILABLE:
+                    tc, raw, conf = self.ocr_with_tesseract(img, scale)
+                    if tc and conf > best_conf:
+                        best_tc = tc
+                        best_raw = raw
+                        best_conf = conf
+                        best_method = f"tesseract_{name}_s{scale}"
 
                 # Early exit if we get a high-confidence result
                 if best_conf > 80:
@@ -1055,15 +960,13 @@ class FrameReader:
 
     def extract_timecode(self, frame: np.ndarray) -> Tuple[Optional[Timecode], str]:
         """
-        Extract timecode from frame using enhanced OCR pipeline.
+        Extract timecode from frame using the LEDTimecodeOCR pipeline.
         Returns tuple of (Timecode object, raw OCR text).
 
-        OPTIMISED for speed and accuracy:
-        - ROI-level caching to skip OCR on identical frames (major speedup)
-        - Smart threshold selection based on LED brightness (avoids 5x OCR overhead)
-        - CLAHE contrast enhancement for low-light displays
-        - Caching of last successful threshold method
-        - Early exit on successful OCR
+        Uses the enhanced OCR pipeline with:
+        - Multiple preprocessing strategies for LED dot-matrix displays
+        - Method caching to prioritize previously successful strategies
+        - Stats tracking for debugging and performance monitoring
         """
         if not self.roi_timecode:
             return None, ""
@@ -1085,229 +988,24 @@ class FrameReader:
             # ROI is identical to previous frame - return cached result
             return self._roi_cache['result']
 
-        # For monochrome footage, all channels are the same
+        # Check if ROI is too dark (no LED visible) - skip OCR entirely
         if len(roi.shape) == 3:
-            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            gray_for_check = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         else:
-            gray = roi.copy()
-
-        # OPTIMIZATION: Check if ROI is too dark (no LED visible) - skip OCR entirely
-        mean_brightness = np.mean(gray)
+            gray_for_check = roi
+        mean_brightness = np.mean(gray_for_check)
         if mean_brightness < 10:
             result = (None, "")
             self._roi_cache = {'hash': roi_hash, 'result': result}
             return result
 
-        # OPTIMIZATION: Apply CLAHE for better contrast on dim displays
-        if mean_brightness < 80:
-            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
-            gray = clahe.apply(gray)
+        # Use the enhanced OCR pipeline (LEDTimecodeOCR)
+        tc, raw, _ = self.ocr_pipeline.extract_timecode(roi)
+        result = (tc, raw)
 
-        # Step 1: Apply Gaussian blur to fuse dot-matrix LED dots
-        blur_kernel = 5  # Slightly smaller for speed, still effective
-        blurred = cv2.GaussianBlur(gray, (blur_kernel, blur_kernel), 0)
-
-        # Morphological kernel for closing operations
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-
-        # Debug: Save first few ROI images (only when DEBUG_OCR is enabled)
-        if DEBUG_OCR:
-            if not hasattr(self, '_debug_ocr_count'):
-                self._debug_ocr_count = 0
-            self._debug_ocr_count += 1
-            if self._debug_ocr_count <= 10:
-                try:
-                    DEBUG_OCR_DIR.mkdir(exist_ok=True)
-                    cv2.imwrite(str(DEBUG_OCR_DIR / f"cam{self.camera_id}_frame{self._debug_ocr_count:04d}_1_roi.png"), roi)
-                    cv2.imwrite(str(DEBUG_OCR_DIR / f"cam{self.camera_id}_frame{self._debug_ocr_count:04d}_2_gray.png"), gray)
-                except Exception as e:
-                    self.logger.debug(f"Failed to save debug OCR image: {e}")
-
-        # OPTIMIZATION: Smart threshold selection based on brightness
-        # Instead of trying all 5 thresholds, select 1-2 based on image characteristics
-        max_val = np.max(blurred)
-
-        # Initialize cache for last successful threshold method
-        if not hasattr(self, '_last_successful_thresh'):
-            self._last_successful_thresh = None
-
-        images_to_try = []
-
-        # Detect if this is light-on-dark (LED display) for inversion
-        # LED displays have white dots on dark background, so mean is low
-        is_light_on_dark = mean_brightness < 128
-
-        # If we have a cached successful method, try it first
-        if self._last_successful_thresh:
-            thresh_val = self._last_successful_thresh
-            if thresh_val == 'otsu':
-                _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            else:
-                _, thresh = cv2.threshold(blurred, thresh_val, 255, cv2.THRESH_BINARY)
-            thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-            # Invert LED displays to get black text on white (standard OCR format)
-            if is_light_on_dark:
-                thresh = cv2.bitwise_not(thresh)
-            images_to_try.append((self._last_successful_thresh, thresh))
-
-        # Smart threshold selection based on max brightness
-        if max_val > 200:
-            # Bright LED - use high threshold
-            if self._last_successful_thresh != 200:
-                _, thresh = cv2.threshold(blurred, 200, 255, cv2.THRESH_BINARY)
-                thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-                # Invert LED displays to get black text on white (standard OCR format)
-                if is_light_on_dark:
-                    thresh = cv2.bitwise_not(thresh)
-                images_to_try.append((200, thresh))
-        elif max_val > 150:
-            # Medium brightness - use medium threshold
-            if self._last_successful_thresh != 170:
-                _, thresh = cv2.threshold(blurred, 170, 255, cv2.THRESH_BINARY)
-                thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-                # Invert LED displays to get black text on white (standard OCR format)
-                if is_light_on_dark:
-                    thresh = cv2.bitwise_not(thresh)
-                images_to_try.append((170, thresh))
-        else:
-            # Dim LED - use OTSU auto-threshold
-            if self._last_successful_thresh != 'otsu':
-                _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-                # Invert LED displays to get black text on white (standard OCR format)
-                if is_light_on_dark:
-                    thresh = cv2.bitwise_not(thresh)
-                images_to_try.append(('otsu', thresh))
-
-        # Fallback: add one additional method if primary fails
-        if len(images_to_try) < 2:
-            _, thresh = cv2.threshold(blurred, 150, 255, cv2.THRESH_BINARY)
-            thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-            # Invert LED displays to get black text on white (standard OCR format)
-            if is_light_on_dark:
-                thresh = cv2.bitwise_not(thresh)
-            images_to_try.append((150, thresh))
-
-        # Try each preprocessed image with early exit
-        all_raw_texts = []
-        for thresh_id, img in images_to_try:
-            tc, raw = self._ocr_timecode_easyocr(img)
-            if tc is not None:
-                # Cache successful threshold method for next frame
-                self._last_successful_thresh = thresh_id
-                # Update ROI cache with successful result
-                result = (tc, raw)
-                self._roi_cache = {'hash': roi_hash, 'result': result}
-                return result
-            if raw:
-                all_raw_texts.append(raw)
-
-        # Clear cache on failure (conditions may have changed)
-        self._last_successful_thresh = None
-
-        # Return best raw text even if parsing failed
-        result = (None, all_raw_texts[0] if all_raw_texts else "")
-        # Cache the result even on failure (frame may be genuinely unreadable)
+        # Cache the result
         self._roi_cache = {'hash': roi_hash, 'result': result}
         return result
-    
-    def _ocr_timecode_easyocr(self, img: np.ndarray) -> Tuple[Optional[Timecode], str]:
-        """
-        Perform OCR using EasyOCR and parse timecode.
-
-        OPTIMISED:
-        - 4x scaling for better dot-matrix recognition
-        - EasyOCR accepts grayscale directly (no BGR conversion needed)
-        - Improved character correction mappings
-        """
-        try:
-            reader = get_ocr_reader()
-
-            # OPTIMIZATION: Scale up 4x for better dot-matrix digit recognition
-            # Larger scale helps EasyOCR distinguish individual LED dots as solid digits
-            scale = 4
-            img_scaled = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-
-            # OPTIMIZATION: EasyOCR accepts grayscale images directly
-            # No need to convert to BGR - saves memory allocation and copy
-            img_for_ocr = img_scaled
-
-            img_height = img_for_ocr.shape[0]
-
-            # Run EasyOCR - allowlist digits, colon, and common misread characters
-            # Adding ; helps catch colon misreads
-            results = reader.readtext(
-                img_for_ocr,
-                allowlist='0123456789:;.',
-                paragraph=False,
-                detail=1,
-                width_ths=0.8,  # Slightly more lenient for grouped digits
-                height_ths=0.8,
-                low_text=0.3,   # Lower threshold to catch dim digits
-            )
-
-            if not results:
-                return None, ""
-
-            # Filter results: only keep text from the UPPER portion of the ROI
-            # The timecode display is at the top, labels like SCENE/SHOT are below
-            upper_threshold = img_height * 0.5  # Only look at top 50% of ROI
-
-            filtered_results = []
-            for (bbox, text, confidence) in results:
-                # bbox is [[x1,y1], [x2,y1], [x2,y2], [x1,y2]]
-                center_y = (bbox[0][1] + bbox[2][1]) / 2
-
-                # Only include if in upper portion of image
-                if center_y < upper_threshold and confidence > 0.1:
-                    clean_text = text.strip()
-                    if len(clean_text) >= 1:
-                        filtered_results.append((bbox, text, confidence))
-
-            if not filtered_results:
-                # Fallback: try all results if filtering removed everything
-                filtered_results = [(b, t, c) for b, t, c in results if c > 0.1]
-
-            # Sort by x-position (left to right)
-            sorted_results = sorted(filtered_results, key=lambda r: r[0][0][0])
-
-            # Combine text
-            raw_parts = []
-            for (bbox, text, confidence) in sorted_results:
-                raw_parts.append(text)
-
-            raw_text = ''.join(raw_parts)
-
-            # IMPROVED: Comprehensive character correction for dot-matrix displays
-            # Normalize separators first
-            raw_text = raw_text.replace(';', ':').replace('.', ':').replace(' ', '')
-
-            # Common letter-to-digit misreads (expanded set)
-            char_corrections = {
-                'O': '0', 'o': '0', 'D': '0', 'Q': '0', 'C': '0',
-                'l': '1', 'I': '1', '|': '1', 'T': '1', 'i': '1', 'L': '1', '!': '1', 'J': '1',
-                'Z': '2', 'z': '2',
-                'E': '3',
-                'A': '4', 'H': '4', 'h': '4',
-                'S': '5', 's': '5',
-                'G': '6', 'b': '6',
-                'B': '8',
-                'g': '9', 'q': '9', 'P': '9', 'p': '9',
-            }
-            for char, digit in char_corrections.items():
-                raw_text = raw_text.replace(char, digit)
-
-            # Try to parse timecode
-            tc = Timecode.from_string(raw_text)
-            return tc, raw_text
-
-        except Exception as e:
-            self.logger.debug(f"EasyOCR error: {e}")
-            return None, ""
-    
-        # Use enhanced OCR pipeline
-        tc, raw, _ = self.ocr_pipeline.extract_timecode(roi)
-        return tc, raw
 
     def compute_frame_hash(self, frame: np.ndarray) -> str:
         """Compute perceptual hash for frame comparison."""
