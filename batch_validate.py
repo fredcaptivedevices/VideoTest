@@ -46,11 +46,12 @@ class TakeDiscovery:
         
         for root, dirs, files in os.walk(self.base_path):
             root_path = Path(root)
-            
+
             # Check if this folder looks like a take
             mov_files = [f for f in files if f.endswith('.mov')]
-            json_files = [f for f in files if f.endswith('.json')]
-            
+            # Exclude roi_config.json and other non-metadata JSON files
+            json_files = [f for f in files if f.endswith('.json') and f != 'roi_config.json']
+
             if len(mov_files) == 2 and len(json_files) == 2:
                 # Verify we have left/right pairs
                 if self._has_valid_pairs(mov_files, json_files):
@@ -83,10 +84,11 @@ class TakeDiscovery:
         Returns dict with keys: video_a, video_b, metadata_a, metadata_b
         """
         take_path = Path(take_path)
-        
+
         mov_files = list(take_path.glob('*.mov'))
-        json_files = list(take_path.glob('*.json'))
-        
+        # Exclude roi_config.json - only get camera metadata JSON files
+        json_files = [f for f in take_path.glob('*.json') if f.name != 'roi_config.json']
+
         if len(mov_files) != 2 or len(json_files) != 2:
             self.logger.error(f"Invalid take folder: {take_path}")
             return None
